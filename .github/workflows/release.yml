@@ -97,8 +97,16 @@ jobs:
             tar -xzf ../dist/*-${{ matrix.target }}.tar.gz
             if [ "$RUNNER_OS" = Linux ]; then file domain-check | grep -E 'static(-pie|ally) linked'; fi
           fi
-          test -s LICENSE && test -s THIRD-PARTY-LICENSES.txt
+          test -s LICENSE
+          for n in 'Additional Notices for Moka' 'Phosphor Icons' 'RDAP bootstrap data from IANA (CC0)'; do grep -qF "$n" THIRD-PARTY-LICENSES.txt; done
           ./domain-check --version | grep -E '^domain-check [0-9.]+ [(]RDAP bootstrap [0-9-]+[)]$'
+          # Answers that need no network: special-use names and addresses are refused before any query.
+          answer() { want=$1; shift; code=0; ./domain-check "$@" > a.json || code=$?; test $code = $want; }
+          answer 1 printer.localhost --json
+          grep -F '"code":"special_use"' a.json
+          answer 1 192.0.2.1 --json
+          grep -F '"code":"ip_address"' a.json
+          answer 2 lookup 192.0.2.1 MX
       - name: Copy the files with wrong checksums
         run: mkdir bad && cp dist/* bad/ && sed -i.bak 's/^./x/' bad/SHA256SUMS
       # The installers are tested here, on throwaway runners, because they edit the user's PATH.
@@ -133,6 +141,13 @@ jobs:
           }
           # A new shell finds it through the user PATH alone.
           powershell -NoProfile -Command '$env:Path = [Environment]::GetEnvironmentVariable(''Path'', ''User''); domain-check --version'
+          # An upgrade works while the page runs, and a later one clears the moved copy.
+          $p = Start-Process "$dir\domain-check.exe" 'ui --no-open' -PassThru -WindowStyle Hidden
+          Start-Sleep 1
+          if ($p.HasExited) { throw 'domain-check ui stopped' }
+          powershell -NoProfile -File dist/install.ps1
+          if ($LASTEXITCODE) { throw 'upgrade failed while domain-check ui ran' }
+          Stop-Process $p.Id; $p.WaitForExit()
           # Other files in the folder stay.
           Set-Content "$dir\notes.old" 'kept'
           powershell -NoProfile -File dist/install.ps1
