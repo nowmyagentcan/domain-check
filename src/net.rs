@@ -75,13 +75,21 @@ pub fn ca_file(path: &str) -> Result<Vec<CertificateDer<'static>>, Error> {
     let certs: Vec<_> = CertificateDer::pem_slice_iter(&bytes)
         .filter_map(Result::ok)
         .collect();
-    match certs.is_empty() {
-        true => Err(Error::usage(
+    if certs.is_empty() {
+        return Err(Error::usage(
             format!("--ca-file {path} holds no PEM certificate."),
             "Pass a file with -----BEGIN CERTIFICATE----- blocks.",
-        )),
-        false => Ok(certs),
+        ));
     }
+    // The checks would only fail later, blaming this computer's certificates.
+    let mut roots = rustls::RootCertStore::empty();
+    if certs.iter().any(|c| roots.add(c.clone()).is_err()) {
+        return Err(Error::usage(
+            format!("--ca-file {path} holds a certificate that can't be read."),
+            "Export the certificate again as PEM.",
+        ));
+    }
+    Ok(certs)
 }
 
 pub fn provider() -> Arc<CryptoProvider> {

@@ -646,7 +646,6 @@ fn percent_encoded_url_hosts_are_decoded() {
 }
 
 #[test]
-#[ignore = "known bug: DC14"]
 fn a_ca_file_with_a_broken_certificate_is_a_usage_error() {
     let dir = std::env::temp_dir().join(format!("dc-ca-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
