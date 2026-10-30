@@ -21,13 +21,44 @@ const AUTHORITATIVE: Ask = Ask {
     dnssec_ok: true,
 };
 
+/// How the resolvers are asked.
+const RECURSIVE: Ask = Ask {
+    rd: true,
+    ..AUTHORITATIVE
+};
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Propagation {
     pub types: Vec<String>,
     pub zone: Option<String>,
+    /// Every resolver that answered agrees with the nameservers; `None` when there was nothing
+    /// to compare.
+    pub consistent: Option<bool>,
     pub authoritative: Vec<Server>,
+    pub resolvers: Vec<View>,
     /// Types the authoritative servers answer differently (geo-DNS, load balancing).
     pub varies: Vec<String>,
+    pub wildcard: bool,
+    /// This computer's resolver answers for a name the nameservers say doesn't exist.
+    pub rewrites_nxdomain: bool,
+}
+
+/// What one resolver has cached.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct View {
+    pub name: &'static str,
+    pub address: String,
+    /// `ok`, `timeout`, `refused` or `error`.
+    pub status: &'static str,
+    pub answers: Keyed<Seen>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Seen {
+    #[serde(flatten)]
+    pub got: Got,
+    /// Matches an authoritative answer; `None` for a `varies` type or with none to match.
+    pub agrees: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -118,14 +149,40 @@ pub async fn run(cx: &Cx, facts: &Facts) -> (Section<Propagation>, Vec<Finding>)
         }
     }
 
-    let mut questions = vec![(zone.clone(), RecordType::SOA)];
-    questions.extend(cx.types.iter().map(|&t| (d.to_string(), t)));
-    let asks = targets.iter().map(|&(_, ip)| {
-        let (r, questions) = (Arc::clone(r), questions.clone());
-        let at = SocketAddr::new(ip, 53);
-        async move { dns::ask_all(&r, Some(at), questions, AUTHORITATIVE).await }
+    let types: Vec<_> = cx.types.iter().map(|&t| (d.to_string(), t)).collect();
+    let questions = [vec![(zone.clone(), RecordType::SOA)], types.clone()].concat();
+    let asks: Vec<_> = targets
+        .iter()
+        .map(|&(_, ip)| {
+            let (r, questions) = (Arc::clone(r), questions.clone());
+            let at = SocketAddr::new(ip, 53);
+            async move { dns::ask_all(&r, Some(at), questions, AUTHORITATIVE).await }
+        })
+        .collect();
+    let auth = tokio::spawn(dns::join(asks));
+    // This computer's resolver last, under the name "System".
+    let mut views: Vec<_> = cx.resolvers.iter().map(|&(n, at)| (n, Some(at))).collect();
+    views.push(("System", None));
+    let asks: Vec<_> = views
+        .iter()
+        .map(|&(_, at)| {
+            let (r, types) = (Arc::clone(r), types.clone());
+            async move { dns::ask_all(&r, at, types, RECURSIVE).await }
+        })
+        .collect();
+    let seen = tokio::spawn(dns::join(asks));
+    let probe = tokio::spawn({
+        let first = targets.first().map(|&(_, ip)| SocketAddr::new(ip, 53));
+        let (r, name) = (Arc::clone(r), format!("{}.{d}", probe_label()));
+        async move {
+            let auth = match first {
+                Some(at) => Some(r.query(at, &name, RecordType::A, AUTHORITATIVE).await),
+                None => None,
+            };
+            (auth, r.lookup(&name, RecordType::A).await)
+        }
     });
-    let replies = dns::join(asks).await;
+    let replies = dns::wait(auth).await;
 
     let mut found = Vec::new();
     let mut out = Propagation {
@@ -169,11 +226,36 @@ pub async fn run(cx: &Cx, facts: &Facts) -> (Section<Propagation>, Vec<Finding>)
             answers: Keyed(answers.collect()),
         });
     }
-    if out
-        .authoritative
-        .iter()
-        .all(|s| matches!(s.status, "timeout" | "no_route" | "refused" | "error"))
-    {
+    for (&(name, at), replies) in views.iter().zip(dns::wait(seen).await) {
+        let address = at.unwrap_or(r.first());
+        let status = view_status(&replies);
+        if let (Some(at), Some(why)) = (at, dns::unanswered(&replies)) {
+            let (ip, port) = (at.ip(), at.port());
+            let message = format!("Couldn't reach {name} ({ip}) on port {port}: {why}.");
+            let hint =
+                "Your network may block DNS to outside resolvers; the other results still stand.";
+            found.push(finding(
+                Severity::Info,
+                "resolver_unreachable",
+                message,
+                hint,
+            ));
+        }
+        let answers = cx.types.iter().zip(&replies).filter_map(|(t, a)| {
+            let got = Got::of(a.as_ref().ok()?, d, *t);
+            Some((t.to_string(), Seen { got, agrees: None }))
+        });
+        out.resolvers.push(View {
+            name,
+            address: dns::show(address),
+            status,
+            answers: Keyed(answers.collect()),
+        });
+    }
+    let (probe_auth, probe_system) = dns::wait(probe).await;
+    let silent = |s: &str| matches!(s, "timeout" | "no_route" | "refused" | "error");
+    let auth_silent = out.authoritative.iter().all(|s| silent(s.status));
+    if auth_silent && out.resolvers.iter().all(|v| v.status != "ok") {
         let reason = "None of the nameservers or resolvers answered.";
         return (Section::not(Status::Unavailable, reason), found);
     }
@@ -218,7 +300,96 @@ pub async fn run(cx: &Cx, facts: &Facts) -> (Section<Propagation>, Vec<Finding>)
             found.push(finding(Severity::Info, "propagation_varies", message, ""));
         }
     }
+
+    // Each resolver's answer against every authoritative one, for the types that don't vary.
+    let mut compared = false;
+    for view in out.resolvers.iter_mut().filter(|v| v.status == "ok") {
+        for (t, seen) in view.answers.0.iter_mut() {
+            let expected: Vec<&Got> = ok.iter().filter_map(|s| s.answers.get(t)).collect();
+            if out.varies.contains(t) || expected.is_empty() {
+                continue;
+            }
+            let agrees = expected.iter().any(|g| g.key() == seen.got.key());
+            seen.agrees = Some(agrees);
+            compared = true;
+            if !agrees {
+                let (name, address) = (view.name, &view.address);
+                let (got, want) = (describe(&seen.got), describe(expected[0]));
+                let mut message = format!(
+                    "{name} ({address}) still answers {t} {got} for {d}; the nameservers say {want}."
+                );
+                if let Some(ttl) = seen.got.ttl {
+                    message += &format!(" Its copy expires within {ttl} s.");
+                }
+                found.push(finding(Severity::Info, "propagation_stale", message, ""));
+            }
+        }
+    }
+    let mut views = out.resolvers.iter().flat_map(|v| &v.answers.0);
+    out.consistent = compared.then(|| views.all(|(_, s)| s.agrees != Some(false)));
+
+    if let Some(Ok(m)) = &probe_auth {
+        let code = m.metadata.response_code;
+        out.wildcard = code == ResponseCode::NoError && !m.answers.is_empty();
+        out.rewrites_nxdomain = code == ResponseCode::NXDomain
+            && probe_system
+                .as_ref()
+                .is_ok_and(|m| first_address(m).is_some());
+    }
+    if out.wildcard {
+        let message = format!("{zone} has a wildcard record: any name under {d} resolves.");
+        found.push(finding(Severity::Info, "wildcard", message, ""));
+    }
+    if out.rewrites_nxdomain {
+        let message = format!(
+            "Your DNS resolver ({}) answers for names that don't exist, so what you see may differ from the internet.",
+            dns::show(r.first())
+        );
+        let hint =
+            "Your ISP or network may be redirecting typos; compare with the public resolvers.";
+        found.push(finding(
+            Severity::Warning,
+            "resolver_rewrites_nxdomain",
+            message,
+            hint,
+        ));
+    }
     (Section::ok(out), found)
+}
+
+/// An answer as the stale-copy message quotes it.
+fn describe(g: &Got) -> String {
+    match (g.values.is_empty(), g.rcode.as_str()) {
+        (false, _) => g.values.join(", "),
+        (true, "NOERROR") => "no records".into(),
+        (true, code) => code.into(),
+    }
+}
+
+/// `dc-` and 16 random letters and digits: a name nobody has created.
+fn probe_label() -> String {
+    use std::hash::BuildHasher;
+    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let seed = std::collections::hash_map::RandomState::new();
+    let pick = |i: u8| char::from(CHARS[(seed.hash_one(i) % 36) as usize]);
+    format!("dc-{}", (0..16).map(pick).collect::<String>())
+}
+
+/// A resolver's status: `ok` once any query got an answer other than REFUSED.
+fn view_status(replies: &[Answer]) -> &'static str {
+    let refused = |a: &Answer| match a {
+        Ok(m) => m.metadata.response_code == ResponseCode::Refused,
+        Err(f) => *f == Failure::Refused,
+    };
+    if replies.iter().any(|a| a.is_ok() && !refused(a)) {
+        "ok"
+    } else if replies.iter().any(refused) {
+        "refused"
+    } else if replies.iter().any(|a| matches!(a, Err(Failure::Timeout))) {
+        "timeout"
+    } else {
+        "error"
+    }
 }
 
 /// The first address in an A or AAAA answer.

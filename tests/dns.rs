@@ -475,7 +475,11 @@ fn each_authoritative_nameserver_is_asked_directly() {
     assert_eq!(p["authoritative"], want);
     assert!(codes(&r).is_empty());
     let direct: Vec<_> = stub.queries().into_iter().filter(|q| !q.rd).collect();
-    assert_eq!(direct.len(), 10, "SOA and four types at each address");
+    assert_eq!(
+        direct.len(),
+        11,
+        "SOA and four types at each address, and the probe"
+    );
     assert!(direct.iter().all(|q| q.dnssec_ok));
     let at: BTreeSet<_> = direct.iter().map(|q| q.at.to_string()).collect();
     assert_eq!(
@@ -582,4 +586,174 @@ fn propagation_needs_the_zone() {
     let reason = j!("No DNS answer, so this check couldn't run.");
     assert_eq!((&p["status"], &p["reason"]), (&j!("unavailable"), &reason));
     assert_eq!(r["dns"]["status"], "skipped");
+}
+
+#[test]
+fn resolvers_are_compared_with_the_nameservers() {
+    let stub = DnsStub::new();
+    let (code, r) = propagation(&stub, "example.com", &["-t", "A,MX"]);
+    assert_eq!(code, 0);
+    let p = &r["propagation"];
+    assert_eq!(
+        (&p["consistent"], &p["wildcard"], &p["rewrites_nxdomain"]),
+        (&j!(true), &j!(false), &j!(false))
+    );
+    let seen = |values: &[&str], ttl| j!({ "rcode": "NOERROR", "values": values, "ttl": ttl, "agrees": true });
+    let answers = j!({
+        "A": seen(&["192.0.2.10"], 300),
+        "MX": seen(&["20 mx2.example.net", "10 mx1.example.net"], 3600),
+    });
+    let view = |name: &str| j!({ "name": name, "address": stub.addr(), "status": "ok", "answers": answers });
+    assert_eq!(p["resolvers"], j!([view("Custom"), view("System")]));
+    // The probe: one random name under the domain, at the first nameserver and the resolver.
+    let probes: Vec<_> = stub
+        .queries()
+        .into_iter()
+        .filter(|q| q.name.starts_with("dc-"))
+        .collect();
+    assert_eq!(probes.len(), 2, "{probes:?}");
+    let label = probes[0].name.strip_suffix(".example.com").unwrap();
+    assert_eq!(label.len(), 19);
+    assert!(
+        label[3..]
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    );
+    assert_eq!(
+        (probes[0].rd, probes[0].at.to_string()),
+        (false, "127.0.0.1".into())
+    );
+    assert!(probes[1].rd && probes[1].name == probes[0].name);
+}
+
+#[test]
+fn a_stale_resolver_and_an_unreachable_one_are_info() {
+    let stub = DnsStub::new();
+    let stale = DnsStub::start(|a| match (a.name.as_str(), a.qtype, a.rd) {
+        ("example.com", RecordType::A, true) => Some(common::Reply {
+            answers: vec![common::record(
+                "example.com",
+                1840,
+                domain_check::dns::RData::A("192.0.2.9".parse().unwrap()),
+            )],
+            ..common::Reply::default()
+        }),
+        _ => common::fixtures(a),
+    });
+    let closed = closed_udp_port().to_string();
+    let (dns, ports) = (stub.addr(), stub.ports());
+    let args = [
+        "example.com",
+        "-c",
+        "propagation",
+        "-t",
+        "A,TXT",
+        "--dns",
+        &dns,
+        "--resolver",
+        &stale.addr(),
+        "--resolver",
+        &closed,
+    ];
+    let (code, v) = json(&args, &[("DOMAIN_CHECK_LOOPBACK_PORTS", &ports)]);
+    assert_eq!(code, 0, "{v}");
+    let r = &v["reports"][0];
+    let p = &r["propagation"];
+    assert_eq!(p["consistent"], false);
+    let custom = &p["resolvers"][0];
+    assert_eq!(custom["answers"]["A"]["agrees"], false);
+    assert_eq!(custom["answers"]["TXT"]["agrees"], true);
+    let message = format!(
+        "Custom ({}) still answers A 192.0.2.9 for example.com; the nameservers say 192.0.2.10. Its copy expires within 1840 s.",
+        stale.addr()
+    );
+    assert_eq!(
+        finding(r, "propagation_stale"),
+        ("info", message.as_str(), &Value::Null)
+    );
+    let down = &p["resolvers"][1];
+    assert_eq!(down["answers"], j!({}));
+    assert!(
+        matches!(down["status"].as_str(), Some("refused" | "timeout")),
+        "{down}"
+    );
+    let (_, message, hint) = finding(r, "resolver_unreachable");
+    let port = closed.rsplit(':').next().unwrap();
+    let start = format!("Couldn't reach Custom (127.0.0.1) on port {port}: ");
+    assert!(message.starts_with(&start), "{message}");
+    let hint_text =
+        "Your network may block DNS to outside resolvers; the other results still stand.";
+    assert_eq!(hint, &j!(hint_text));
+    assert_eq!(p["resolvers"][2]["name"], "System");
+}
+
+#[test]
+fn wildcards_and_rewritten_nxdomain_answers_are_detected() {
+    let stub = DnsStub::new();
+    let (code, r) = propagation(&stub, "wild.example.org", &["-t", "A"]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        (
+            &r["propagation"]["wildcard"],
+            &r["propagation"]["rewrites_nxdomain"]
+        ),
+        (&j!(true), &j!(false))
+    );
+    let message =
+        "wild.example.org has a wildcard record: any name under wild.example.org resolves.";
+    assert_eq!(finding(&r, "wildcard"), ("info", message, &Value::Null));
+
+    let rewriting = DnsStub::start(|a| match a.rd && a.name.starts_with("dc-") {
+        true => Some(common::Reply {
+            answers: vec![common::record(
+                &a.name,
+                60,
+                domain_check::dns::RData::A("192.0.2.99".parse().unwrap()),
+            )],
+            ..common::Reply::default()
+        }),
+        false => common::fixtures(a),
+    });
+    let (code, r) = propagation(&rewriting, "example.com", &["-t", "A"]);
+    assert_eq!(code, 0);
+    let p = &r["propagation"];
+    assert_eq!(
+        (&p["wildcard"], &p["rewrites_nxdomain"]),
+        (&j!(false), &j!(true))
+    );
+    let message = format!(
+        "Your DNS resolver ({}) answers for names that don't exist, so what you see may differ from the internet.",
+        rewriting.addr()
+    );
+    let hint =
+        j!("Your ISP or network may be redirecting typos; compare with the public resolvers.");
+    assert_eq!(
+        finding(&r, "resolver_rewrites_nxdomain"),
+        ("warning", message.as_str(), &hint)
+    );
+}
+
+#[test]
+fn varying_types_and_silent_servers_leave_nothing_to_compare() {
+    let stub = DnsStub::new();
+    let (_, r) = propagation(&stub, "geo.example.org", &["-t", "A,MX"]);
+    let custom = &r["propagation"]["resolvers"][0]["answers"];
+    assert_eq!(
+        (&custom["A"]["agrees"], &custom["MX"]["agrees"]),
+        (&Value::Null, &j!(true))
+    );
+    assert_eq!(r["propagation"]["consistent"], true);
+
+    // Nameservers and resolvers that never answer: the section can't say anything.
+    let mute = DnsStub::start(|a| match !a.rd || a.qtype == RecordType::MX {
+        true => None,
+        false => common::fixtures(a),
+    });
+    let started = std::time::Instant::now();
+    let (code, r) = propagation(&mute, "example.com", &["-t", "MX"]);
+    assert!(started.elapsed().as_secs() < 15);
+    assert_eq!(code, 3);
+    let p = &r["propagation"];
+    let reason = j!("None of the nameservers or resolvers answered.");
+    assert_eq!((&p["status"], &p["reason"]), (&j!("unavailable"), &reason));
 }

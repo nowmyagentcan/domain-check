@@ -328,7 +328,8 @@ pub fn records(owner: &str, t: RecordType, at: Option<IpAddr>) -> Option<Vec<Rec
         ],
         ("geo.example.org", T::A) if v6 => a([192, 0, 2, 42]),
         ("geo.example.org", T::A) => a([192, 0, 2, 41]),
-        (_, T::A) if zone.is_some_and(|z| z.ends_with(".example.org")) => a([192, 0, 2, 30]),
+        (_, T::A) if apex && owner.ends_with(".example.org") => a([192, 0, 2, 30]),
+        (_, T::A) if zone == Some("wild.example.org") => a([192, 0, 2, 30]),
         // A wildcard: every name under wild.example.org exists.
         _ if zone == Some("wild.example.org") || apex || chain.is_some() => Vec::new(),
         (

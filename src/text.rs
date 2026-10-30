@@ -126,13 +126,32 @@ fn dns(d: &Dns) -> String {
 }
 
 fn propagation(p: &Propagation) -> String {
-    let answered = p.authoritative.iter().filter(|s| s.status == "ok").count();
+    let ok = |status: &str| status == "ok";
     let silent = p
         .authoritative
         .iter()
-        .filter(|s| s.status != "ok" && s.status != "no_route")
+        .filter(|s| !ok(s.status) && s.status != "no_route")
         .count();
-    let mut out = format!("{answered} nameserver addresses answer");
+    let mut out = match p.consistent {
+        None => "no answers to compare".to_string(),
+        Some(true) => format!(
+            "consistent: {} nameserver addresses, {} resolvers agree on {}",
+            p.authoritative.iter().filter(|s| ok(s.status)).count(),
+            p.resolvers.iter().filter(|v| ok(v.status)).count(),
+            p.types.join(", ")
+        ),
+        Some(false) => {
+            let differ: Vec<_> = p
+                .resolvers
+                .iter()
+                .flat_map(|v| {
+                    let wrong = v.answers.0.iter().filter(|(_, s)| s.agrees == Some(false));
+                    wrong.map(|(t, _)| format!("{} differs on {t}", v.name))
+                })
+                .collect();
+            format!("not consistent: {}", differ.join(", "))
+        }
+    };
     match silent {
         0 => {}
         1 => out += " · 1 nameserver address didn't answer",

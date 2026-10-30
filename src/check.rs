@@ -96,11 +96,7 @@ impl Facts {
 
     /// Why nothing came back, when no query got any answer.
     pub fn unanswered(&self) -> Option<&Failure> {
-        let mut failures = self.answers.iter().map(|(_, a)| a.as_ref().err());
-        failures
-            .next()
-            .flatten()
-            .filter(|_| failures.all(|f| f.is_some()))
+        dns::unanswered(self.answers.iter().map(|(_, a)| a))
     }
 
     /// False when the resolver said NXDOMAIN for the name itself (not for a CNAME's target).

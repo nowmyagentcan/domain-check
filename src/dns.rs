@@ -356,6 +356,15 @@ pub fn cname(m: &Message, owner: &str) -> Option<String> {
 /// What a query got: the response, or why none came.
 pub type Answer = Result<Message, Failure>;
 
+/// Why nothing came back, when none of the queries got a response.
+pub fn unanswered<'a>(answers: impl IntoIterator<Item = &'a Answer>) -> Option<&'a Failure> {
+    let mut failures = answers.into_iter().map(|a| a.as_ref().err());
+    failures
+        .next()
+        .flatten()
+        .filter(|_| failures.all(|f| f.is_some()))
+}
+
 /// Runs the futures together on this thread's runtime; their outputs in order.
 pub async fn join<F>(futures: impl IntoIterator<Item = F>) -> Vec<F::Output>
 where
