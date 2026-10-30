@@ -492,10 +492,7 @@ fn connect(net: &Net, ip: IpAddr) -> Result<TcpStream, String> {
     let to = net.ports.swap(SocketAddr::new(ip, 443));
     let start = Instant::now();
     let got = TcpStream::connect_timeout(&to, net::CONNECT);
-    let got = got.map_err(|e| match net::Failed::from_io(&e) {
-        Failed::Connect(why) => why,
-        f => f.to_string(),
-    });
+    let got = got.map_err(|e| Failed::from_io(&e).to_string());
     if net.debug {
         let outcome = got
             .as_ref()
@@ -531,12 +528,12 @@ fn handshake(net: &Net, d: &str, ip: IpAddr, mut sock: TcpStream) -> (Section<Tl
                 .with_custom_certificate_verifier(recorder.clone())
                 .with_no_client_auth()
         });
-    let (Ok(mut config), Ok(name)) = (config, ServerName::try_from(d.to_string())) else {
-        let reason = "Couldn't set up TLS for this name.";
-        return (Section::not(Status::Unavailable, reason), found);
-    };
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    let Ok(mut conn) = ClientConnection::new(Arc::new(config), name) else {
+    let conn = config.ok().zip(ServerName::try_from(d.to_string()).ok());
+    let conn = conn.and_then(|(mut config, name)| {
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        ClientConnection::new(Arc::new(config), name).ok()
+    });
+    let Some(mut conn) = conn else {
         let reason = "Couldn't set up TLS for this name.";
         return (Section::not(Status::Unavailable, reason), found);
     };
