@@ -852,17 +852,19 @@ fn dmarc_tags_report_addresses_and_their_authorisation() {
         hints,
         [j!("Use t=y for a test phase instead."), j!(null), j!(null)]
     );
-    let asked: Vec<_> = stub
+    // Asked together, so in any order.
+    let mut asked: Vec<_> = stub
         .queries()
         .into_iter()
         .map(|q| q.name)
         .filter(|n| n.contains("._report."))
         .collect();
+    asked.sort();
     assert_eq!(
         asked,
         [
-            "dmarc.example.net._report._dmarc.example.org",
-            "dmarc.example.net._report._dmarc.example.com"
+            "dmarc.example.net._report._dmarc.example.com",
+            "dmarc.example.net._report._dmarc.example.org"
         ]
     );
 }
