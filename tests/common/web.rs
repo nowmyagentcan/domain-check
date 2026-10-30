@@ -84,6 +84,9 @@ fn sts_policy(host: &str) -> Reply {
         "sts404" => Reply::new(404, &[], "not found\n"),
         "stsbig" => text(&format!("version: STSv1\n{}", "#".repeat(70 * 1024))),
         "stssyntax" => text("version: STSv2\nmode: block\nmax_age: forever\n"),
+        "stsdup" => {
+            text("version: STSv1\nmode: enforce\nmode: none\nmx: mx1.example.net\nmax_age: 86400\n")
+        }
         _ => text("version: STSv1\r\nmode: enforce\r\nmx: mx1.example.net\r\nmax_age: 604800\r\n"),
     }
 }
@@ -173,6 +176,11 @@ fn registry(name: &str, nth: usize) -> Reply {
         "deleting.example.com" => record(Some(300), &["pending delete"], true),
         "noexpiry.example.com" => record(None, &lock, true),
         "nolock.uk" => record(Some(300), &[], false),
+        "wrongobj.example.com" => rdap_json(
+            200,
+            domain("someone-else.example.net", Some(300), &[], &ns, false),
+        ),
+        "emptyobj.example.com" => rdap_json(200, json!({})),
         _ => rdap_json(404, json!({ "errorCode": 404, "title": "Not Found" })),
     }
 }
@@ -289,6 +297,11 @@ pub fn route(host: &str, path: &str, https: bool, nth: usize) -> Reply {
             "ok\n",
         ),
         ("bare", true, _) => Reply::new(200, &[("Content-Type", "text/plain")], "ok\n"),
+        ("hstsdup", true, _) => Reply::new(
+            200,
+            &[("Strict-Transport-Security", "max-age=63072000; max-age=0")],
+            "ok\n",
+        ),
         (_, true, _) => Reply::new(200, &GOOD, "ok\n"),
         _ => Reply::new(200, &[("Content-Type", "text/plain")], "ok\n"),
     }

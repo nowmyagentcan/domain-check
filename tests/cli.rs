@@ -630,3 +630,80 @@ fn colour_only_when_asked_and_never_with_no_color() {
     // An empty NO_COLOR doesn't turn colour off.
     assert!(run_with(Some("")).contains('\x1b'));
 }
+
+#[test]
+#[ignore = "known bug: DC12"]
+fn percent_encoded_url_hosts_are_decoded() {
+    let stub = DnsStub::new();
+    let dns = stub.addr();
+    for (input, domain) in [
+        ("https://b%C3%BCcher.de/", "xn--bcher-kva.de"),
+        ("https://%65xample.com/", "example.com"),
+    ] {
+        let (_, v) = json(&[input, "-c", "dns", "--dns", &dns], &[]);
+        let r = &v["reports"][0];
+        assert_eq!(r["domain"], domain, "{}", r["error"]);
+    }
+}
+
+#[test]
+#[ignore = "known bug: DC14"]
+fn a_ca_file_with_a_broken_certificate_is_a_usage_error() {
+    let dir = std::env::temp_dir().join(format!("dc-ca-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("broken.pem");
+    std::fs::write(
+        &file,
+        "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n",
+    )
+    .unwrap();
+    let path = file.to_str().unwrap();
+    let (code, _, err) = run(&["example.com", "-c", "tls", "--ca-file", path], &[]);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("broken.pem"), "{err}");
+}
+
+#[test]
+fn every_subset_of_checks_runs_only_what_it_names() {
+    let stub = DnsStub::new();
+    let (dns, ports) = (stub.addr(), stub.ports());
+    let env = [("DOMAIN_CHECK_LOOPBACK_PORTS", ports.as_str())];
+    let names = ["dns", "propagation", "email", "rdap", "tls", "http"];
+    for mask in 1..64u8 {
+        let picked: Vec<_> = (0..6)
+            .filter(|i| mask >> i & 1 == 1)
+            .map(|i| names[i])
+            .collect();
+        let list = picked.join(",");
+        let args = [
+            "example.com",
+            "-c",
+            &list,
+            "--dns",
+            &dns,
+            "--resolver",
+            &dns,
+        ];
+        let (_, v) = json(&args, &env);
+        let r = &v["reports"][0];
+        for name in names {
+            let skipped = r[name]["status"] == "skipped" && r[name]["reason"] == "not requested";
+            assert_eq!(
+                skipped,
+                !picked.contains(&name),
+                "{list} {name}: {}",
+                r[name]
+            );
+        }
+        let findings = r["findings"].as_array().unwrap();
+        let checks: Vec<_> = findings
+            .iter()
+            .map(|f| f["check"].as_str().unwrap())
+            .collect();
+        assert!(
+            checks.iter().all(|c| picked.contains(c)),
+            "{list}: {checks:?}"
+        );
+    }
+}

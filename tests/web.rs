@@ -317,3 +317,42 @@ fn headers_of_the_last_https_answer_are_graded() {
     let (_, r) = allowed(&stub, &web, "selfsigned.example.com");
     assert_eq!(r["http"]["headers"], Value::Null);
 }
+
+#[test]
+#[ignore = "known bug: DC01"]
+fn https_that_fails_verification_is_a_finding_without_the_tls_check() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    for domain in [
+        "selfsigned.example.com",
+        "expired.example.com",
+        "wrongname.example.com",
+    ] {
+        let (_, r) = allowed(&stub, &web, domain);
+        assert!(r["http"]["https"]["error"].is_string(), "{}", r["http"]);
+        // tls isn't requested, so only http can tell the user that https doesn't load.
+        let findings = r["findings"].as_array().unwrap();
+        assert!(
+            findings.iter().any(|f| f["check"] == "http"
+                && f["severity"] != "info"
+                && f["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("https://{domain}"))),
+            "{domain}: {:?}",
+            found(&r)
+        );
+    }
+}
+
+#[test]
+#[ignore = "known bug: DC13"]
+fn a_repeated_hsts_directive_is_invalid() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let (_, r) = allowed(&stub, &web, "hstsdup.example.com");
+    // RFC 6797 §6.1: each directive appears once; browsers ignore a header that breaks this.
+    let codes = found(&r);
+    assert!(
+        codes.iter().any(|c| c.starts_with("hsts_invalid")),
+        "{codes:?}"
+    );
+}

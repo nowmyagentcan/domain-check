@@ -1476,3 +1476,110 @@ fn email_stays_within_its_budget_when_answers_go_missing() {
     .sum();
     assert!(failed > 0, "{r}");
 }
+
+/// The severities of the findings whose code starts with `prefix`.
+fn severities<'a>(report: &'a Value, prefix: &str) -> Vec<&'a str> {
+    found(report, prefix).into_iter().map(|f| f.1).collect()
+}
+
+#[test]
+#[ignore = "known bug: DC03"]
+fn mx_hosts_without_addresses_are_void_lookups() {
+    let stub = DnsStub::new();
+    // Three mx terms whose hosts have no address: three void lookups before the ip4 match.
+    let (_, r) = email(&stub, "voidmx.example.net", &["--spf-ip", "192.0.2.1"]);
+    let spf = &r["email"]["spf"];
+    assert!(spf["void_lookups"].as_u64().unwrap() > 2, "{spf}");
+    assert_eq!(spf["result"]["result"], "permerror", "{spf}");
+    assert_eq!(
+        severities(&r, "spf_too_many_void"),
+        ["error"],
+        "{:?}",
+        found(&r, "spf")
+    );
+}
+
+#[test]
+#[ignore = "known bug: DC11"]
+fn terms_after_all_are_never_evaluated() {
+    let stub = DnsStub::new();
+    let (code, r) = email(&stub, "afterall.example.net", &[]);
+    let spf = &r["email"]["spf"];
+    assert_eq!(spf["lookups"], 0, "{spf}");
+    assert!(
+        !severities(&r, "spf").contains(&"error"),
+        "{:?}",
+        found(&r, "spf")
+    );
+    assert_ne!(code, 1);
+}
+
+#[test]
+#[ignore = "known bug: DC06"]
+fn a_repeated_dmarc_tag_is_invalid() {
+    let stub = DnsStub::new();
+    let (_, r) = email(&stub, "dupdmarc.example.net", &[]);
+    assert_eq!(
+        severities(&r, "dmarc_syntax"),
+        ["error"],
+        "{:?}",
+        found(&r, "dmarc")
+    );
+}
+
+#[test]
+#[ignore = "known bug: DC07"]
+fn a_record_with_rua_and_no_p_is_read_as_p_none() {
+    let stub = DnsStub::new();
+    let (code, r) = email(&stub, "ruaonly.example.net", &[]);
+    assert_eq!(r["email"]["dmarc"]["tags"]["p"], "none");
+    // RFC 9989 §4.7: p is RECOMMENDED; §4.10.1 reads the record as p=none.
+    assert!(
+        found(&r, "dmarc_syntax").is_empty(),
+        "{:?}",
+        found(&r, "dmarc")
+    );
+    assert_eq!(severities(&r, "dmarc_p_none"), ["warning"]);
+    assert_eq!(code, 0, "{:?}", found(&r, ""));
+}
+
+#[test]
+#[ignore = "known bug: DC08"]
+fn two_keys_at_one_selector_are_flagged() {
+    let stub = DnsStub::new();
+    let (_, r) = email(&stub, "twokeys.example.net", &["-s", "s"]);
+    // RFC 6376 §3.6.2.2: with more than one key record the verifier may pick either one.
+    assert!(
+        severities(&r, "dkim").iter().any(|s| *s != "info"),
+        "{:?} {}",
+        found(&r, "dkim"),
+        r["email"]["dkim"]
+    );
+}
+
+#[test]
+#[ignore = "known bug: DC09"]
+fn a_repeated_dkim_tag_makes_the_record_invalid() {
+    let stub = DnsStub::new();
+    let (_, r) = email(&stub, "duptag.example.net", &["-s", "s"]);
+    // RFC 6376 §3.2: a tag name that occurs twice makes the whole tag-list invalid.
+    assert_eq!(
+        severities(&r, "dkim_syntax"),
+        ["error"],
+        "{}",
+        r["email"]["dkim"]
+    );
+}
+
+#[test]
+#[ignore = "known bug: DC05"]
+fn a_repeated_mta_sts_mode_is_a_policy_error() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let r = fetched(&stub, &web, "stsdup.example.net");
+    assert!(
+        r["email"]["mta_sts"]["policy"]["error"].is_string(),
+        "{}",
+        r["email"]["mta_sts"]
+    );
+    assert_eq!(severities(&r, "mta_sts_policy_syntax"), ["error"]);
+}

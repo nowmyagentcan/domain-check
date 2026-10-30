@@ -426,3 +426,20 @@ fn the_text_report_has_a_registration_line() {
         ]
     );
 }
+
+#[test]
+#[ignore = "known bug: DC10"]
+fn an_object_for_another_name_or_no_name_is_no_record() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let names = ["wrongobj.example.com", "emptyobj.example.com"];
+    let (_, reports) = rdap(&stub, &web, &names, BOOTSTRAP);
+    for r in &reports {
+        let s = &r["rdap"];
+        assert!(s["status"] != "ok" || s["found"] == false, "{s}");
+        assert!(
+            found(r)
+                .iter()
+                .all(|f| !f.starts_with("rdap_no_transfer_lock"))
+        );
+    }
+}

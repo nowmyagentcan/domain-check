@@ -777,3 +777,34 @@ fn answers_arrive_while_other_programs_hold_loopback_ports() {
         assert!(!err.contains(" timeout "), "{err}");
     }
 }
+
+#[test]
+#[ignore = "known bug: DC02"]
+fn txt_values_that_differ_only_in_case_differ() {
+    use hickory_proto::rr::rdata::TXT;
+    // The nameservers publish the new token; the resolver still has the old one.
+    let stub = DnsStub::start(|a| {
+        if a.name != "token.example.com" {
+            return common::fixtures(a);
+        }
+        let token = if a.rd { "token=AbC123" } else { "token=abc123" };
+        let txt = domain_check::dns::RData::TXT(TXT::new(vec![token.into()]));
+        let answers = match a.qtype {
+            RecordType::TXT => vec![common::record(&a.name, 300, txt)],
+            _ => Vec::new(),
+        };
+        Some(common::Reply {
+            authorities: match answers.is_empty() {
+                true => vec![common::soa("example.com", 2026103001)],
+                false => Vec::new(),
+            },
+            answers,
+            aa: !a.rd,
+            ..common::Reply::default()
+        })
+    });
+    let (_, r) = propagation(&stub, "token.example.com", &["-t", "TXT"]);
+    let p = &r["propagation"];
+    assert_eq!(p["consistent"], false, "{p}");
+    assert_eq!(p["resolvers"][0]["answers"]["TXT"]["agrees"], false);
+}

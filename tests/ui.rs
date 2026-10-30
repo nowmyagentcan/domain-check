@@ -598,3 +598,85 @@ fn runs_with_stderr_closed() {
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
 }
+
+/// The page's own script, run in node with every element a stub that takes anything: for each
+/// report on stdin, what render() and the Copy text throw, or nothing.
+const RENDER: &str = r#"
+const fs = require("fs"), vm = require("vm");
+const html = fs.readFileSync(process.argv[1], "utf8");
+const script = html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>"));
+const stub = () => new Proxy(function () {}, {
+  get: (t, k) => k === Symbol.toPrimitive ? () => "" : k in t ? t[k] : stub(),
+  apply: () => stub(),
+});
+const page = { document: stub(), navigator: stub(), URL: stub(), Blob: function () {}, addEventListener() {},
+  innerHeight: 800, setTimeout, clearTimeout, setInterval, clearInterval };
+const [render, textReport] = vm.runInNewContext(script + "\n;[render, textReport]", page);
+for (const res of JSON.parse(fs.readFileSync(0, "utf8"))) {
+  try { render(res); textReport(res.reports[0]); } catch (e) { console.log(`${res.reports[0].input}: ${e.message}`); }
+}
+"#;
+
+/// The page script's errors for the `check <domain> <args> --json` answer of each entry;
+/// empty when every report renders.
+fn page_errors(checks: &[(&str, &[&str])]) -> String {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let (dns, ports) = (stub.addr(), web.ports(&stub));
+    let env = [("DOMAIN_CHECK_LOOPBACK_PORTS", ports.as_str())];
+    let local = [
+        "--dns",
+        &dns,
+        "--resolver",
+        &dns,
+        "--ca-file",
+        &web.ca,
+        "--allow-private",
+    ];
+    let reports: Vec<Value> = checks
+        .iter()
+        .map(|(domain, args)| {
+            let out = command(&[&[*domain][..], args, &local, &["--json"]].concat(), &env)
+                .output()
+                .unwrap();
+            serde_json::from_slice(&out.stdout).unwrap()
+        })
+        .collect();
+    let page = concat!(env!("CARGO_MANIFEST_DIR"), "/src/ui.html");
+    let mut node = std::process::Command::new("node")
+        .args(["-e", RENDER, page])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("node, to run the page's script");
+    let input = serde_json::to_vec(&reports).unwrap();
+    node.stdin.take().unwrap().write_all(&input).unwrap();
+    let out = node.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn the_page_script_renders_reports() {
+    let all: &[&str] = &["-c", "dns,email,tls,http"];
+    assert_eq!(
+        page_errors(&[
+            ("web.example.com", all),
+            ("sts.example.net", all),
+            ("printer.test", &[])
+        ]),
+        ""
+    );
+}
+
+#[test]
+#[ignore = "known bug: DC04"]
+fn the_page_script_renders_reports_with_failed_parts() {
+    // https fails at the first hop (no headers), and an MTA-STS record with no valid id (no policy).
+    let checks: &[(&str, &[&str])] = &[
+        ("selfsigned.example.com", &["-c", "dns,email,tls,http"]),
+        ("stsnoid.example.net", &["-c", "email"]),
+    ];
+    assert_eq!(page_errors(checks), "");
+}
