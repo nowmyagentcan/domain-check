@@ -100,6 +100,10 @@ jobs:
           test -s LICENSE
           for n in 'Additional Notices for Moka' 'Phosphor Icons' 'RDAP bootstrap data from IANA (CC0)'; do grep -qF "$n" THIRD-PARTY-LICENSES.txt; done
           ./domain-check --version | grep -E '^domain-check [0-9.]+ [(]RDAP bootstrap [0-9-]+[)]$'
+          b=$(wc -c < domain-check*) a=$(wc -c < ../dist/*-${{ matrix.target }}.*)
+          echo "binary $b bytes, archive $a bytes"
+          test $b -le 6291456
+          test $a -le 3145728
           # Answers that need no network: special-use names and addresses are refused before any query.
           answer() { want=$1; shift; code=0; ./domain-check "$@" > a.json || code=$?; test $code = $want; }
           answer 1 printer.localhost --json
