@@ -182,7 +182,7 @@ fn the_spf_walk_follows_includes_and_counts_each_lookup() {
     );
     let spf = j!({
         "record": "v=spf1 include:_spf.example.net a mx ip4:192.0.2.0/24 ptr exists:%{i}.exists.example.net -all",
-        "lookups": 6, "lookups_capped": false, "void_lookups": 0, "all": "-all", "redirect": null,
+        "lookups": 6, "lookups_capped": false, "void_lookups": 0, "all": "-all", "redirect": null, "result": null,
         "tree": [
             node("include:_spf.example.net", j!("v=spf1 include:_inner.example.net ip6:2001:db8::/32 ~all"), j!(null), j!([inner])),
             leaf("a"),
@@ -225,7 +225,7 @@ fn more_than_10_lookups_is_an_error_and_the_walk_stops_at_20() {
         (&spf["lookups"], &spf["lookups_capped"]),
         (&j!(12), &j!(false))
     );
-    assert_eq!(spf["tree"][5]["children"], j!([leaf("mx:mx.example.net")]));
+    assert_eq!(spf["tree"][5]["children"], j!([leaf("a:mx1.example.net")]));
     assert_eq!(
         finding(&r, "spf_too_many_lookups"),
         (
@@ -474,5 +474,202 @@ fn spf_records_that_are_missing_doubled_broken_or_too_long() {
                 "Couldn't look up servfail.example.org for SPF (SERVFAIL); the lookup count may be incomplete."
             ),
         ]
+    );
+}
+
+#[test]
+fn spf_is_evaluated_for_a_sending_address() {
+    let stub = DnsStub::new();
+    let cases = [
+        (
+            "eval.example.net",
+            "192.0.2.66",
+            "fail",
+            "-ip4:192.0.2.66",
+            j!([]),
+        ),
+        (
+            "eval.example.net",
+            "192.0.2.27",
+            "pass",
+            "a:mx1.example.net/30",
+            j!([]),
+        ),
+        ("eval.example.net", "192.0.2.200", "pass", "mx/24", j!([])),
+        (
+            "eval.example.net",
+            "2001:db8:1::5",
+            "pass",
+            "ip6:2001:db8:1::/48",
+            j!([]),
+        ),
+        (
+            "eval.example.net",
+            "198.51.100.20",
+            "pass",
+            "exists:%{l}.%{ir}.%{v}._ok.%{d2}",
+            j!([]),
+        ),
+        (
+            "eval.example.net",
+            "203.0.113.5",
+            "pass",
+            "ip4:203.0.113.0/24",
+            j!(["include:soft.example.net"]),
+        ),
+        (
+            "eval.example.net",
+            "2001:db8::99",
+            "neutral",
+            "?all",
+            j!([]),
+        ),
+        ("soft.example.net", "192.0.2.1", "softfail", "~all", j!([])),
+        (
+            "spf.example.net",
+            "198.51.100.7",
+            "pass",
+            "ip4:198.51.100.0/24",
+            j!(["include:_spf.example.net", "include:_inner.example.net"]),
+        ),
+        (
+            "spf.example.net",
+            "::ffff:192.0.2.5",
+            "pass",
+            "ip4:192.0.2.0/24",
+            j!([]),
+        ),
+        (
+            "redirect.example.net",
+            "198.51.100.7",
+            "pass",
+            "ip4:198.51.100.0/24",
+            j!(["redirect=_spf.example.net", "include:_inner.example.net"]),
+        ),
+        (
+            "ptr.example.net",
+            "192.0.2.10",
+            "pass",
+            "ptr:example.com",
+            j!([]),
+        ),
+        (
+            "ptr.example.net",
+            "198.51.100.30",
+            "pass",
+            "exists:%{i}._ip.%{d}",
+            j!([]),
+        ),
+        ("ptr.example.net", "198.51.100.31", "fail", "-all", j!([])),
+        (
+            "many.example.net",
+            "203.0.113.1",
+            "permerror",
+            "include:_n6.example.net",
+            j!([]),
+        ),
+        (
+            "void.example.net",
+            "203.0.113.1",
+            "permerror",
+            "exists:gone.example.org",
+            j!([]),
+        ),
+        (
+            "syntax.example.net",
+            "203.0.113.1",
+            "permerror",
+            "inlcude:_spf.example.net",
+            j!([]),
+        ),
+        (
+            "failing.example.net",
+            "203.0.113.1",
+            "temperror",
+            "include:servfail.example.net",
+            j!([]),
+        ),
+    ];
+    for (domain, ip, result, matched, via) in cases {
+        let (_, r) = email(&stub, domain, &["--spf-ip", ip]);
+        let want = j!({ "ip": ip, "result": result, "matched": matched, "via": via });
+        assert_eq!(r["email"]["spf"]["result"], want, "{domain} {ip}");
+    }
+    let message = |domain, ip| {
+        let (_, r) = email(&stub, domain, &["--spf-ip", ip]);
+        let (severity, message, hint) = finding(&r, "spf_ip_result");
+        (severity.to_string(), message.to_string(), hint.clone())
+    };
+    let none = j!(null);
+    let says = |s: &str, m: &str, h: &Value| (s.to_string(), m.to_string(), h.clone());
+    assert_eq!(
+        message("spf.example.net", "198.51.100.7"),
+        says(
+            "info",
+            "SPF for 198.51.100.7: pass (matched ip4:198.51.100.0/24 via include:_spf.example.net → include:_inner.example.net).",
+            &none
+        )
+    );
+    assert_eq!(
+        message("eval.example.net", "192.0.2.66"),
+        says(
+            "error",
+            "SPF for 192.0.2.66: fail (matched -ip4:192.0.2.66).",
+            &j!("Add this sender to the SPF record if it is yours.")
+        )
+    );
+    assert_eq!(
+        message("soft.example.net", "192.0.2.1"),
+        says(
+            "warning",
+            "SPF for 192.0.2.1: softfail (matched ~all).",
+            &none
+        )
+    );
+    assert_eq!(
+        message("many.example.net", "203.0.113.1"),
+        says(
+            "error",
+            "SPF for 203.0.113.1: permerror at include:_n6.example.net.",
+            &none
+        )
+    );
+    assert_eq!(
+        message("failing.example.net", "203.0.113.1"),
+        says(
+            "warning",
+            "SPF for 203.0.113.1: temperror at include:servfail.example.net.",
+            &none
+        )
+    );
+    assert_eq!(
+        message("noall.example.net", "203.0.113.1"),
+        says(
+            "warning",
+            "SPF for 203.0.113.1: neutral; no term matched.",
+            &none
+        )
+    );
+    let (_, r) = email(&stub, "nomail.example.net", &["--spf-ip", "192.0.2.1"]);
+    assert_eq!(r["email"]["spf"], j!(null));
+    assert_eq!(
+        finding(&r, "spf_ip_result"),
+        (
+            "warning",
+            "SPF for 192.0.2.1: none; no term matched.",
+            &none
+        )
+    );
+    let (_, r) = email(&stub, "multi.example.net", &["--spf-ip", "192.0.2.1"]);
+    assert_eq!(r["email"]["spf"]["result"]["result"], "permerror");
+}
+
+#[test]
+fn spf_ip_must_be_an_address() {
+    let (code, out, err) = common::run(&["example.com", "--spf-ip", "mail.example.com"], &[]);
+    assert_eq!((code, out.as_str()), (2, ""));
+    assert_eq!(
+        err,
+        "✗ --spf-ip mail.example.com isn't an IP address.\n  Pass the sending server's address, e.g. --spf-ip 192.0.2.10.\n"
     );
 }

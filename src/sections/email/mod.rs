@@ -99,7 +99,7 @@ pub async fn run(cx: &Cx, facts: &Facts) -> (Section<Email>, Vec<Finding>) {
         domain: d.to_string(),
         until: cx.until(Check::Email).into(),
     });
-    let spf = tokio::spawn(spf::run(Arc::clone(&mail)));
+    let spf = tokio::spawn(spf::run(Arc::clone(&mail), cx.spf_ip));
     let mut found = Vec::new();
     let mx = mx(&mail, facts, &mut found).await;
     let (spf, more) = dns::wait(spf).await;

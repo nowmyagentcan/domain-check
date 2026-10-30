@@ -233,6 +233,7 @@ fn raw(t: RecordType, bytes: &[u8]) -> RData {
 
 /// The mail fixtures: owner, type, value. A listed owner exists and has no records of the
 /// types not listed for it; an owner `*.x` stands for every name under x that isn't listed.
+#[rustfmt::skip]
 pub const MAIL: &[(&str, RecordType, &str)] = {
     use RecordType::*;
     &[
@@ -253,73 +254,36 @@ pub const MAIL: &[(&str, RecordType, &str)] = {
         // SPF
         ("spf.example.net", A, "192.0.2.30"),
         ("spf.example.net", MX, "10 mx1.example.net"),
-        (
-            "spf.example.net",
-            TXT,
-            "v=spf1 include:_spf.example.net a mx ip4:192.0.2.0/24 ptr exists:%{i}.exists.example.net -all",
-        ),
-        (
-            "_spf.example.net",
-            TXT,
-            "v=spf1 include:_inner.example.net ip6:2001:db8::/32 ~all",
-        ),
+        ("spf.example.net", TXT, "v=spf1 include:_spf.example.net a mx ip4:192.0.2.0/24 ptr exists:%{i}.exists.example.net -all"),
+        ("_spf.example.net", TXT, "v=spf1 include:_inner.example.net ip6:2001:db8::/32 ~all"),
         ("_inner.example.net", TXT, "v=spf1 ip4:198.51.100.0/24 -all"),
-        (
-            "many.example.net",
-            TXT,
-            "v=spf1 include:_n1.example.net include:_n2.example.net include:_n3.example.net include:_n4.example.net include:_n5.example.net include:_n6.example.net -all",
-        ),
-        ("_n1.example.net", TXT, "v=spf1 mx:mx.example.net ~all"),
-        ("_n2.example.net", TXT, "v=spf1 mx:mx.example.net ~all"),
-        ("_n3.example.net", TXT, "v=spf1 mx:mx.example.net ~all"),
-        ("_n4.example.net", TXT, "v=spf1 mx:mx.example.net ~all"),
-        ("_n5.example.net", TXT, "v=spf1 mx:mx.example.net ~all"),
-        ("_n6.example.net", TXT, "v=spf1 mx:mx.example.net ~all"),
-        (
-            "capped.example.net",
-            TXT,
-            "v=spf1 include:many.example.net include:many.example.net -all",
-        ),
-        (
-            "void.example.net",
-            TXT,
-            "v=spf1 a:gone.example.net mx:noaddr.example.net exists:gone.example.org include:nomail.example.net include:gone.example.net ~all",
-        ),
-        (
-            "loop.example.net",
-            TXT,
-            "v=spf1 include:_loop.example.net -all",
-        ),
-        (
-            "_loop.example.net",
-            TXT,
-            "v=spf1 include:LOOP.example.net. ~all",
-        ),
-        (
-            "redirect.example.net",
-            TXT,
-            "v=spf1 redirect=_spf.example.net",
-        ),
-        (
-            "redirected.example.net",
-            TXT,
-            "v=spf1 ip4:192.0.2.1 redirect=_spf.example.net ?all",
-        ),
+        ("many.example.net", TXT, "v=spf1 include:_n1.example.net include:_n2.example.net include:_n3.example.net include:_n4.example.net include:_n5.example.net include:_n6.example.net -all"),
+        ("_n1.example.net", TXT, "v=spf1 a:mx1.example.net ~all"),
+        ("_n2.example.net", TXT, "v=spf1 a:mx1.example.net ~all"),
+        ("_n3.example.net", TXT, "v=spf1 a:mx1.example.net ~all"),
+        ("_n4.example.net", TXT, "v=spf1 a:mx1.example.net ~all"),
+        ("_n5.example.net", TXT, "v=spf1 a:mx1.example.net ~all"),
+        ("_n6.example.net", TXT, "v=spf1 a:mx1.example.net ~all"),
+        ("capped.example.net", TXT, "v=spf1 include:many.example.net include:many.example.net -all"),
+        ("void.example.net", TXT, "v=spf1 a:gone.example.net mx:noaddr.example.net exists:gone.example.org include:nomail.example.net include:gone.example.net ~all"),
+        ("loop.example.net", TXT, "v=spf1 include:_loop.example.net -all"),
+        ("_loop.example.net", TXT, "v=spf1 include:LOOP.example.net. ~all"),
+        ("redirect.example.net", TXT, "v=spf1 redirect=_spf.example.net"),
+        ("redirected.example.net", TXT, "v=spf1 ip4:192.0.2.1 redirect=_spf.example.net ?all"),
         ("plusall.example.net", TXT, "v=spf1 all"),
         ("noall.example.net", TXT, "v=spf1 ip4:192.0.2.1"),
         ("multi.example.net", TXT, "v=spf1 -all"),
         ("multi.example.net", TXT, "v=spf1 ~all"),
         ("multi.example.net", TXT, "spf2.0/mfrom,pra -all"),
-        (
-            "syntax.example.net",
-            TXT,
-            "v=spf1 inlcude:_spf.example.net ip4:192.0.2.300 -all",
-        ),
-        (
-            "failing.example.net",
-            TXT,
-            "v=spf1 include:servfail.example.net a:servfail.example.org -all",
-        ),
+        ("syntax.example.net", TXT, "v=spf1 inlcude:_spf.example.net ip4:192.0.2.300 -all"),
+        ("failing.example.net", TXT, "v=spf1 include:servfail.example.net a:servfail.example.org -all"),
+        // SPF evaluated for one address
+        ("eval.example.net", MX, "10 mx2.example.net"),
+        ("eval.example.net", TXT, "v=spf1 -ip4:192.0.2.66 a:mx1.example.net/30 mx/24 ip6:2001:db8:1::/48 exists:%{l}.%{ir}.%{v}._ok.%{d2} include:soft.example.net ?all"),
+        ("postmaster.20.100.51.198.in-addr._ok.example.net", A, "127.0.0.2"),
+        ("soft.example.net", TXT, "v=spf1 ip4:203.0.113.0/24 ~all"),
+        ("ptr.example.net", TXT, "v=spf1 ptr:example.com exists:%{i}._ip.%{d} -all"),
+        ("198.51.100.30._ip.ptr.example.net", A, "127.0.0.2"),
     ]
 };
 

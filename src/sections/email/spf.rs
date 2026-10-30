@@ -30,6 +30,20 @@ pub struct Spf {
     /// The `redirect=` target, when it applies (there is no `all`).
     pub redirect: Option<String>,
     pub tree: Vec<Node>,
+    /// What `check_host()` gives the `--spf-ip` address.
+    pub result: Option<Verdict>,
+}
+
+/// SPF's answer for one sending address (RFC 7208 §2.6).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Verdict {
+    pub ip: String,
+    /// `pass`, `fail`, `softfail`, `neutral`, `none`, `permerror` or `temperror`.
+    pub result: &'static str,
+    /// The term that decided it, or where evaluation stopped on an error.
+    pub matched: Option<String>,
+    /// The `include` and `redirect` terms that led to that record.
+    pub via: Vec<String>,
 }
 
 /// A term that queries DNS, with what it found.
@@ -392,7 +406,20 @@ fn target(spec: &str, v: &Vars) -> Option<String> {
     Some(name.trim_end_matches('.').to_string())
 }
 
-pub async fn run(mail: Arc<Mail>) -> (Option<Spf>, Vec<Finding>) {
+/// The record and its walk, plus the verdict for `ip` when one is given.
+pub async fn run(mail: Arc<Mail>, ip: Option<IpAddr>) -> (Option<Spf>, Vec<Finding>) {
+    let (mut spf, mut found) = read(Arc::clone(&mail)).await;
+    if let Some(ip) = ip {
+        let verdict = evaluate(mail, ip).await;
+        found.push(verdict_finding(&verdict));
+        if let Some(spf) = &mut spf {
+            spf.result = Some(verdict);
+        }
+    }
+    (spf, found)
+}
+
+async fn read(mail: Arc<Mail>) -> (Option<Spf>, Vec<Finding>) {
     let d = mail.domain.clone();
     let mut found = Vec::new();
     let txts = match mail.values(&d, RecordType::TXT).await {
@@ -536,8 +563,261 @@ pub async fn run(mail: Arc<Mail>) -> (Option<Spf>, Vec<Finding>) {
         all,
         redirect,
         tree,
+        result: None,
     };
     (Some(spf), unique)
+}
+
+/// `check_host()` (§4) for mail from `ip` with sender `postmaster@<domain>`.
+async fn evaluate(mail: Arc<Mail>, ip: IpAddr) -> Verdict {
+    let mut e = Eval {
+        mail: Arc::clone(&mail),
+        ip: ip.to_canonical(),
+        lookups: 0,
+        voids: 0,
+    };
+    let (result, matched, via) = e.check(mail.domain.clone(), Vec::new()).await;
+    Verdict {
+        ip: ip.to_string(),
+        result,
+        matched,
+        via,
+    }
+}
+
+fn verdict_finding(v: &Verdict) -> Finding {
+    let severity = match v.result {
+        "pass" => Severity::Info,
+        "fail" | "permerror" => Severity::Error,
+        _ => Severity::Warning,
+    };
+    let via = match v.via.as_slice() {
+        [] => String::new(),
+        path => format!(" via {}", path.join(" → ")),
+    };
+    let (ip, result) = (&v.ip, v.result);
+    let message = match &v.matched {
+        None => format!("SPF for {ip}: {result}; no term matched."),
+        Some(term) if result.ends_with("error") => {
+            format!("SPF for {ip}: {result} at {term}{via}.")
+        }
+        Some(term) => format!("SPF for {ip}: {result} (matched {term}{via})."),
+    };
+    let hint = match result {
+        "fail" => "Add this sender to the SPF record if it is yours.",
+        _ => "",
+    };
+    finding(severity, "spf_ip_result", message, hint)
+}
+
+/// The result, the term it ended at, and the include path to that term's record.
+type Outcome = (&'static str, Option<String>, Vec<String>);
+
+/// One evaluation's state: the lookups and void lookups so far, across every record it reads.
+struct Eval {
+    mail: Arc<Mail>,
+    ip: IpAddr,
+    lookups: u32,
+    voids: u32,
+}
+
+impl Eval {
+    fn check(&mut self, current: String, via: Vec<String>) -> Boxed<'_, Outcome> {
+        Box::pin(async move {
+            let txts = match self.mail.values(&current, RecordType::TXT).await {
+                Ok(txts) => txts.unwrap_or_default(),
+                Err(_) => return ("temperror", None, via),
+            };
+            let records: Vec<_> = txts.into_iter().filter(|t| is_spf(t)).collect();
+            let record = match records.as_slice() {
+                [] => return ("none", None, via),
+                [one] => one.clone(),
+                _ => return ("permerror", None, via),
+            };
+            let parsed = parse(&record);
+            if let Some((_, term)) = parsed.errors.first() {
+                return ("permerror", Some(term.to_string()), via);
+            }
+            let domain = self.mail.domain.clone();
+            let vars = Vars {
+                domain: &domain,
+                current: &current,
+                ip: self.ip,
+            };
+            for t in &parsed.terms {
+                let Term::Directive {
+                    text,
+                    qualifier,
+                    mech,
+                    domain: spec,
+                    net,
+                    cidr,
+                } = t
+                else {
+                    continue;
+                };
+                let stop = |result| (result, Some(text.to_string()), via.clone());
+                let hit = match mech {
+                    Mech::All => true,
+                    Mech::Ip4 | Mech::Ip6 => {
+                        let len = if self.ip.is_ipv4() { cidr.0 } else { cidr.1 };
+                        net.is_some_and(|net| within(self.ip, net, len))
+                    }
+                    _ => {
+                        self.lookups += 1;
+                        if self.lookups > LIMIT {
+                            return stop("permerror");
+                        }
+                        let Some(name) = target(spec.unwrap_or(&current), &vars) else {
+                            return stop("permerror");
+                        };
+                        let hit = match mech {
+                            Mech::Include => {
+                                let path = [&via[..], &[text.to_string()]].concat();
+                                match self.check(name, path).await {
+                                    // The term that matched in there decides, with this
+                                    // include's qualifier.
+                                    ("pass", matched, via) => {
+                                        return (result(*qualifier), matched, via);
+                                    }
+                                    ("fail" | "softfail" | "neutral", ..) => Ok(false),
+                                    ("none", ..) => Err("permerror"),
+                                    // The record itself failed: it stopped at this term.
+                                    (result, None, _) => Err(result),
+                                    deeper => return deeper,
+                                }
+                            }
+                            Mech::Ptr => Ok(self.ptr(&name).await),
+                            Mech::Exists => self
+                                .ask(&name, RecordType::A, true)
+                                .await
+                                .map(|found| !found.is_empty()),
+                            _ => self.addresses(*mech, &name, *cidr).await,
+                        };
+                        match hit {
+                            Ok(hit) => hit,
+                            Err(result) => return stop(result),
+                        }
+                    }
+                };
+                if hit {
+                    return (result(*qualifier), Some(text.to_string()), via);
+                }
+            }
+            let redirect = parsed.terms.iter().find_map(|t| match t {
+                Term::Redirect { text, domain } if !parsed.has_all() => Some((*text, *domain)),
+                _ => None,
+            });
+            let Some((text, spec)) = redirect else {
+                return ("neutral", None, via);
+            };
+            self.lookups += 1;
+            let here = Some(text.to_string());
+            let name = target(spec, &vars).filter(|_| self.lookups <= LIMIT);
+            let Some(name) = name else {
+                return ("permerror", here, via);
+            };
+            let path = [&via[..], &[text.to_string()]].concat();
+            match self.check(name, path).await {
+                ("none", ..) => ("permerror", here, via),
+                (result, None, _) if result.ends_with("error") => (result, here, via),
+                outcome => outcome,
+            }
+        })
+    }
+
+    /// The values of `t` at `name`; a lookup that finds nothing counts as void when `void`.
+    async fn ask(
+        &mut self,
+        name: &str,
+        t: RecordType,
+        void: bool,
+    ) -> Result<Vec<String>, &'static str> {
+        let found = self.mail.values(name, t).await.map_err(|_| "temperror")?;
+        let found = found.unwrap_or_default();
+        if void && found.is_empty() {
+            self.voids += 1;
+            if self.voids > VOID_LIMIT {
+                return Err("permerror");
+            }
+        }
+        Ok(found)
+    }
+
+    fn family(&self) -> RecordType {
+        match self.ip {
+            IpAddr::V4(_) => RecordType::A,
+            IpAddr::V6(_) => RecordType::AAAA,
+        }
+    }
+
+    /// `a` and `mx` (§5.3, §5.4): the address is in the network around one of the name's
+    /// hosts.
+    async fn addresses(
+        &mut self,
+        mech: Mech,
+        name: &str,
+        cidr: (u8, u8),
+    ) -> Result<bool, &'static str> {
+        let hosts = match mech {
+            Mech::Mx => {
+                let mx = self.ask(name, RecordType::MX, true).await?;
+                if mx.len() > 10 {
+                    return Err("permerror");
+                }
+                let hosts = mx.iter().filter_map(|v| v.split_once(' '));
+                hosts.map(|(_, host)| host.to_string()).collect()
+            }
+            _ => vec![name.to_string()],
+        };
+        let len = if self.ip.is_ipv4() { cidr.0 } else { cidr.1 };
+        for host in hosts {
+            let found = self.ask(&host, self.family(), mech == Mech::A).await?;
+            let mut nets = found.iter().filter_map(|v| v.parse().ok());
+            if nets.any(|net| within(self.ip, net, len)) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// `ptr` (§5.5): a name of the address that maps back to it and ends in `name`. Lookup
+    /// errors only make it not match.
+    async fn ptr(&mut self, name: &str) -> bool {
+        let reverse = crate::lookup::reverse(self.ip);
+        let names = self.mail.values(&reverse, RecordType::PTR).await;
+        let names = names.ok().flatten().unwrap_or_default();
+        for host in names.iter().take(10) {
+            let found = self.mail.values(host, self.family()).await;
+            let found = found.ok().flatten().unwrap_or_default();
+            let back = found.iter().any(|v| v.parse() == Ok(self.ip));
+            if back && (host == name || host.ends_with(&format!(".{name}"))) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// What a matching term with this qualifier gives (§4.6.2).
+fn result(qualifier: char) -> &'static str {
+    match qualifier {
+        '-' => "fail",
+        '~' => "softfail",
+        '?' => "neutral",
+        _ => "pass",
+    }
+}
+
+/// `ip` is in `net`/`len`; addresses of another family never are.
+fn within(ip: IpAddr, net: IpAddr, len: u8) -> bool {
+    let (a, b, bits): (u128, u128, u32) = match (ip, net) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => (u32::from(a).into(), u32::from(b).into(), 32),
+        (IpAddr::V6(a), IpAddr::V6(b)) => (a.into(), b.into(), 128),
+        _ => return false,
+    };
+    let shift = bits.saturating_sub(len.into());
+    a.checked_shr(shift).unwrap_or(0) == b.checked_shr(shift).unwrap_or(0)
 }
 
 fn multiple(name: &str, n: usize) -> Finding {
@@ -750,6 +1030,18 @@ mod tests {
 
     fn errors(record: &str) -> Vec<(String, &str)> {
         parse(record).errors
+    }
+
+    #[test]
+    fn networks_hold_addresses_of_their_family() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert!(within(ip("192.0.2.27"), ip("192.0.2.25"), 30));
+        assert!(!within(ip("192.0.2.28"), ip("192.0.2.25"), 30));
+        assert!(within(ip("203.0.113.9"), ip("0.0.0.0"), 0));
+        assert!(within(ip("2001:db8:1::5"), ip("2001:db8:1::"), 48));
+        assert!(!within(ip("2001:db8:2::5"), ip("2001:db8:1::"), 48));
+        assert!(within(ip("2001:db8::1"), ip("::"), 0));
+        assert!(!within(ip("192.0.2.1"), ip("::ffff:192.0.2.1"), 128));
     }
 
     #[test]

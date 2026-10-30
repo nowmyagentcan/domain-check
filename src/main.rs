@@ -26,6 +26,7 @@ Only ports 53, 80 and 443 are contacted; nothing is stored.
 
 \x1b[1;4mExamples:\x1b[0m
   domain-check example.com
+  domain-check example.com --checks email --spf-ip 192.0.2.10
   domain-check example.com --checks propagation --types A,MX
   domain-check lookup _dmarc.example.com TXT
   domain-check lookup 8.8.8.8
@@ -73,6 +74,9 @@ struct CheckArgs {
         default_value = "all"
     )]
     checks: Vec<String>,
+    /// evaluate SPF for this sending IP
+    #[arg(long, value_name = "IP")]
+    spf_ip: Option<String>,
     /// record types compared in propagation
     #[arg(
         short,
@@ -181,7 +185,18 @@ fn run_check(args: CheckArgs) -> Result<Done, Error> {
             .collect::<Result<_, _>>()?,
         types: lookup::types(&args.types)?,
         selectors: Vec::new(),
-        spf_ip: None,
+        spf_ip: args
+            .spf_ip
+            .as_deref()
+            .map(|ip| {
+                ip.parse().map_err(|_| {
+                    Error::usage(
+                        format!("--spf-ip {ip} isn't an IP address."),
+                        "Pass the sending server's address, e.g. --spf-ip 192.0.2.10.",
+                    )
+                })
+            })
+            .transpose()?,
         ports: Ports::from_env()?,
         debug: args.debug,
     };
