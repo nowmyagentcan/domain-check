@@ -5,6 +5,7 @@ use serde::{Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use crate::input::Domain;
+use crate::sections::dns::Dns;
 use crate::{Error, RDAP_BOOTSTRAP};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -27,6 +28,32 @@ pub enum Check {
     Http,
 }
 
+impl Check {
+    /// The name `--checks` takes.
+    pub fn key(self) -> &'static str {
+        match self {
+            Check::Dns => "dns",
+            Check::Propagation => "propagation",
+            Check::Email => "email",
+            Check::Rdap => "rdap",
+            Check::Tls => "tls",
+            Check::Http => "http",
+        }
+    }
+
+    /// The section's name in the text report.
+    pub fn title(self) -> &'static str {
+        match self {
+            Check::Dns => "DNS",
+            Check::Propagation => "Propagation",
+            Check::Email => "Email",
+            Check::Rdap => "Registration",
+            Check::Tls => "Certificate",
+            Check::Http => "Web",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Finding {
     pub code: &'static str,
@@ -34,6 +61,26 @@ pub struct Finding {
     pub check: Check,
     pub message: String,
     pub hint: Option<String>,
+}
+
+impl Finding {
+    /// A finding; an empty `hint` means it has none.
+    pub fn new(
+        check: Check,
+        severity: Severity,
+        code: &'static str,
+        message: impl Into<String>,
+        hint: impl Into<String>,
+    ) -> Finding {
+        let hint = hint.into();
+        Finding {
+            code,
+            severity,
+            check,
+            message: message.into(),
+            hint: (!hint.is_empty()).then_some(hint),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -45,8 +92,20 @@ pub enum Status {
     Skipped,
 }
 
+impl Status {
+    /// How the text report names it.
+    pub fn text(self) -> &'static str {
+        match self {
+            Status::Ok => "ok",
+            Status::Unavailable => "unavailable",
+            Status::RateLimited => "rate limited",
+            Status::Skipped => "skipped",
+        }
+    }
+}
+
 /// A section's status, why it isn't `ok`, and its fields: all `null` unless it is `ok`.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Section<T> {
     pub status: Status,
     pub reason: Option<String>,
@@ -106,6 +165,39 @@ impl<T: Serialize + Default> Serialize for Section<T> {
     }
 }
 
+/// A JSON object whose keys keep their order (record types in the order the spec lists).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Keyed<T>(pub Vec<(String, T)>);
+
+impl<T> Keyed<T> {
+    pub fn get(&self, key: &str) -> Option<&T> {
+        self.0.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+}
+
+impl<T: Serialize> Serialize for Keyed<T> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_map(self.0.iter().map(|(k, v)| (k, v)))
+    }
+}
+
+/// Every section of a report; all `null` for an invalid input.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Sections {
+    pub dns: Option<Section<Dns>>,
+}
+
+impl Sections {
+    /// Sections that came back `unavailable` or `rate_limited`.
+    pub fn unavailable(&self) -> usize {
+        let statuses = [self.dns.as_ref().map(|s| s.status)];
+        statuses
+            .into_iter()
+            .filter(|s| matches!(s, Some(Status::Unavailable | Status::RateLimited)))
+            .count()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct Counts {
     pub errors: usize,
@@ -124,7 +216,7 @@ impl Counts {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Report {
     pub input: String,
     pub domain: Option<String>,
@@ -133,6 +225,8 @@ pub struct Report {
     pub error: Option<Error>,
     pub counts: Counts,
     pub findings: Vec<Finding>,
+    #[serde(flatten)]
+    pub sections: Sections,
     /// Requested sections that came back `unavailable` or `rate_limited`.
     #[serde(skip)]
     pub unavailable: usize,
@@ -148,6 +242,7 @@ impl Report {
             error: Some(error),
             counts: Counts::default(),
             findings: Vec::new(),
+            sections: Sections::default(),
             unavailable: 0,
         }
     }
@@ -158,7 +253,7 @@ impl Report {
         domain: &Domain,
         checked_at: String,
         mut findings: Vec<Finding>,
-        unavailable: usize,
+        sections: Sections,
     ) -> Report {
         findings.sort_by_key(|f| (f.severity, f.check, f.code));
         Report {
@@ -169,7 +264,8 @@ impl Report {
             error: None,
             counts: Counts::of(&findings),
             findings,
-            unavailable,
+            unavailable: sections.unavailable(),
+            sections,
         }
     }
 }
@@ -255,14 +351,18 @@ mod tests {
         crate::input::domain("https://Example.COM/shop").unwrap()
     }
 
-    fn report(findings: Vec<Finding>, unavailable: usize) -> Report {
+    /// A report whose dns section is unavailable when `down` is set.
+    fn report(findings: Vec<Finding>, down: bool) -> Report {
         let at = "2026-10-30T15:40:12Z".to_string();
+        let sections = Sections {
+            dns: down.then(|| Section::not(Status::Unavailable, "Stopped after 30 s.")),
+        };
         Report::checked(
             "https://Example.COM/shop",
             &example(),
             at,
             findings,
-            unavailable,
+            sections,
         )
     }
 
@@ -280,7 +380,7 @@ mod tests {
                 finding("cname_loop", Error, Dns),
                 finding("dmarc_p_none", Warning, Email),
             ],
-            0,
+            false,
         );
         let order: Vec<_> = r.findings.iter().map(|f| f.code).collect();
         assert_eq!(
@@ -311,7 +411,10 @@ mod tests {
         dmarc.hint = Some("Publish one.".into());
         let at = "2026-10-30T15:40:13Z".to_string();
         let empty = crate::input::domain("").unwrap_err();
-        let out = Output::new(vec![report(vec![dmarc], 0), Report::invalid("", at, empty)]);
+        let out = Output::new(vec![
+            report(vec![dmarc], false),
+            Report::invalid("", at, empty),
+        ]);
         assert_eq!(
             serde_json::to_value(&out).unwrap(),
             json!({
@@ -326,7 +429,8 @@ mod tests {
                         "findings": [{
                             "code": "dmarc_none", "severity": "error", "check": "email",
                             "message": "dmarc_none message.", "hint": "Publish one."
-                        }]
+                        }],
+                        "dns": null
                     },
                     {
                         "input": "",
@@ -338,7 +442,8 @@ mod tests {
                             "hint": "Pass a domain, e.g. example.com."
                         },
                         "counts": { "errors": 0, "warnings": 0, "info": 0 },
-                        "findings": []
+                        "findings": [],
+                        "dns": null
                     }
                 ],
                 "summary": { "domains": 2, "errors": 1, "warnings": 0, "info": 0, "unavailable": 0 },
@@ -382,33 +487,26 @@ mod tests {
         use Severity::*;
         let exit = |reports| Output::new(reports).exit_code();
         let warn = || finding("no_caa", Warning, Check::Dns);
-        assert_eq!(exit(vec![report(vec![], 0)]), 0);
-        assert_eq!(
-            exit(vec![report(
-                vec![warn(), finding("x", Info, Check::Http)],
-                0
-            )]),
-            0
-        );
-        assert_eq!(
-            exit(vec![report(vec![finding("x", Error, Check::Tls)], 0)]),
-            1
-        );
-        assert_eq!(exit(vec![report(vec![warn()], 1)]), 3);
-        assert_eq!(
-            exit(vec![
-                report(vec![], 2),
-                report(vec![finding("x", Error, Check::Dns)], 0)
-            ]),
-            1
-        );
+        assert_eq!(exit(vec![report(vec![], false)]), 0);
+        let quiet = vec![warn(), finding("x", Info, Check::Http)];
+        assert_eq!(exit(vec![report(quiet, false)]), 0);
+        let error = || finding("x", Error, Check::Tls);
+        assert_eq!(exit(vec![report(vec![error()], false)]), 1);
+        assert_eq!(exit(vec![report(vec![warn()], true)]), 3);
+        let mixed = vec![report(vec![], true), report(vec![error()], false)];
+        assert_eq!(exit(mixed), 1);
         let invalid = Report::invalid("a", String::new(), crate::input::domain("a").unwrap_err());
-        assert_eq!(exit(vec![report(vec![], 1), invalid]), 1);
-        assert_eq!(
-            Output::new(vec![report(vec![], 2), report(vec![], 1)])
-                .summary
-                .unavailable,
-            3
-        );
+        assert_eq!(exit(vec![report(vec![], true), invalid]), 1);
+        let two = Output::new(vec![report(vec![], true), report(vec![], true)]);
+        assert_eq!(two.summary.unavailable, 2);
+    }
+
+    #[test]
+    fn findings_without_a_hint_say_null_and_keyed_maps_keep_order() {
+        let f = Finding::new(Check::Dns, Severity::Info, "x", "m", "");
+        assert_eq!(f.hint, None);
+        let keyed = Keyed(vec![("b".to_string(), 1), ("a".to_string(), 2)]);
+        assert_eq!(serde_json::to_string(&keyed).unwrap(), r#"{"b":1,"a":2}"#);
+        assert_eq!(keyed.get("a"), Some(&2));
     }
 }

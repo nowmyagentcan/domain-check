@@ -119,22 +119,8 @@ pub struct Value {
 
 /// Asks for every type, up to 8 at a time.
 pub async fn run(resolver: Arc<Resolver>, name: String, types: Vec<RecordType>) -> Answer {
-    let mut results = Vec::new();
-    for chunk in types.chunks(8) {
-        let tasks: Vec<_> = chunk
-            .iter()
-            .map(|&t| {
-                let (r, n) = (Arc::clone(&resolver), name.clone());
-                (t, tokio::spawn(async move { r.lookup(&n, t).await }))
-            })
-            .collect();
-        for (t, task) in tasks {
-            let answer = task
-                .await
-                .unwrap_or_else(|e| Err(dns::Failure::Other(e.to_string())));
-            results.push(reply(t, answer));
-        }
-    }
+    let answers = dns::lookups(&resolver, &name, &types).await;
+    let results = types.into_iter().zip(answers).map(reply).collect();
     Answer {
         name,
         server: resolver.label.clone(),
@@ -143,7 +129,7 @@ pub async fn run(resolver: Arc<Resolver>, name: String, types: Vec<RecordType>) 
     }
 }
 
-fn reply(t: RecordType, answer: Result<dns::Message, dns::Failure>) -> Reply {
+fn reply((t, answer): (RecordType, dns::Answer)) -> Reply {
     match answer {
         Ok(m) => Reply {
             kind: t.to_string(),
@@ -154,7 +140,7 @@ fn reply(t: RecordType, answer: Result<dns::Message, dns::Failure>) -> Reply {
                 .map(|r| Value {
                     value: dns::value(&r.data),
                     ttl: r.ttl,
-                    owner: r.name.to_ascii().trim_end_matches('.').to_string(),
+                    owner: dns::name(&r.name),
                 })
                 .collect(),
             error: None,

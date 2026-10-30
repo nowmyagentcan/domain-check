@@ -3,8 +3,9 @@ use std::process::ExitCode;
 use std::sync::{Arc, LazyLock};
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use domain_check::check::{self, Options};
 use domain_check::dns::{self, Resolver};
-use domain_check::{Error, Ports, input, lookup};
+use domain_check::{Error, Ports, input, lookup, text};
 
 // clap prints the name itself.
 static VERSION: LazyLock<String> =
@@ -13,12 +14,20 @@ static VERSION: LazyLock<String> =
 const SENTENCE: &str =
     "Check a domain's DNS, email security, registration, certificate and headers.";
 
-const AFTER_HELP: &str = "\x1b[1;4mEnvironment:\x1b[0m
+const USAGE: &str = "domain-check [check] <DOMAIN>... [OPTIONS]
+       domain-check <COMMAND>";
+
+const AFTER_HELP: &str = "Checks: dns.
+Only ports 53, 80 and 443 are contacted; nothing is stored.
+
+\x1b[1;4mEnvironment:\x1b[0m
   DOMAIN_CHECK_LOOPBACK_PORTS    dns=N,http=N,https=N for loopback destinations (tests, mirrors)
 
 \x1b[1;4mExamples:\x1b[0m
+  domain-check example.com
   domain-check lookup _dmarc.example.com TXT
-  domain-check lookup 8.8.8.8";
+  domain-check lookup 8.8.8.8
+  domain-check example.com example.org --json";
 
 #[derive(Parser)]
 #[command(
@@ -26,19 +35,51 @@ const AFTER_HELP: &str = "\x1b[1;4mEnvironment:\x1b[0m
     bin_name = "domain-check",
     about = SENTENCE,
     version = VERSION.as_str(),
+    override_usage = USAGE,
     after_help = AFTER_HELP,
+    args_conflicts_with_subcommands = true,
     disable_help_subcommand = true
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+    #[command(flatten)]
+    check: CheckArgs,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Report on 1-20 domains (the default)
+    #[command(after_help = AFTER_HELP)]
+    Check(CheckArgs),
     /// Run one DNS query (dig-like); an IP address gives its PTR
     #[command(after_help = AFTER_HELP)]
     Lookup(LookupArgs),
+}
+
+#[derive(clap::Args)]
+struct CheckArgs {
+    /// a domain, URL or email address
+    #[arg(value_name = "DOMAIN")]
+    domains: Vec<String>,
+    /// sections to run: dns or all
+    #[arg(
+        short,
+        long,
+        value_name = "LIST",
+        value_delimiter = ',',
+        default_value = "all"
+    )]
+    checks: Vec<String>,
+    /// resolver for every lookup
+    #[arg(long, value_name = "IP[:PORT]")]
+    dns: Option<String>,
+    /// print one JSON object
+    #[arg(long)]
+    json: bool,
+    /// print every query and request on stderr
+    #[arg(long)]
+    debug: bool,
 }
 
 #[derive(clap::Args)]
@@ -93,11 +134,7 @@ fn run_lookup(args: LookupArgs) -> Result<Done, Error> {
     };
     let (name, types) = lookup::question(target, types)?;
     let resolver = Arc::new(Resolver::new(server, ports, args.debug)?);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| Error::new("runtime", format!("Couldn't start: {e}."), "Try again."))?;
-    let answer = runtime.block_on(lookup::run(resolver, name, types));
+    let answer = domain_check::runtime()?.block_on(lookup::run(resolver, name, types));
     let code = answer.exit_code();
     let out = match args.json {
         true => json(&answer)?,
@@ -106,6 +143,32 @@ fn run_lookup(args: LookupArgs) -> Result<Done, Error> {
             answer.text()
         }
     };
+    Ok(Done { out, code })
+}
+
+fn run_check(args: CheckArgs) -> Result<Done, Error> {
+    if args.domains.is_empty() {
+        return Err(Error::usage(
+            "No domain given.",
+            "Try: domain-check example.com",
+        ));
+    }
+    let options = Options {
+        checks: check::checks(&args.checks)?,
+        dns: args
+            .dns
+            .as_deref()
+            .map(|s| dns::server("--dns", s))
+            .transpose()?,
+        ports: Ports::from_env()?,
+        debug: args.debug,
+    };
+    let output = check::run(&args.domains, &options)?;
+    let out = match args.json {
+        true => json(&output)?,
+        false => text::output(&output.reports),
+    };
+    let code = output.exit_code();
     Ok(Done { out, code })
 }
 
@@ -135,8 +198,14 @@ fn cli() -> clap::Command {
     let mut cli = Cli::command();
     cli.build();
     let lower = |c: clap::Command| c.mut_arg("help", |a| a.help("print help"));
-    lower(cli)
+    // `check --help` lists the check options; the top level only -h and -V.
+    let top = cli.mut_args(|a| match a.get_id().as_str() {
+        "help" | "version" => a,
+        _ => a.hide(true),
+    });
+    lower(top)
         .mut_arg("version", |a| a.help("print version"))
+        .mut_subcommand("check", lower)
         .mut_subcommand("lookup", lower)
 }
 
@@ -149,7 +218,9 @@ fn main() -> ExitCode {
         Err(e) => e.exit(),
     };
     let done = match cli.command {
-        Command::Lookup(args) => run_lookup(args),
+        Some(Command::Check(args)) => run_check(args),
+        Some(Command::Lookup(args)) => run_lookup(args),
+        None => run_check(cli.check),
     };
     match done {
         // A closed stdout (`| head`) means nobody reads the rest: stop quietly.

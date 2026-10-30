@@ -73,7 +73,7 @@ impl DnsStub {
         let (udp4, udp6, tcp4, tcp6) = sockets;
         for udp in [udp4, udp6] {
             let (zone, log) = (Arc::clone(&zone), Arc::clone(&log));
-            thread::spawn(move || serve_udp(udp, &*zone, &log));
+            thread::spawn(move || serve_udp(udp, zone, log));
         }
         for tcp in [tcp4, tcp6] {
             let (zone, log) = (Arc::clone(&zone), Arc::clone(&log));
@@ -102,13 +102,19 @@ impl DnsStub {
     }
 }
 
-fn serve_udp(socket: UdpSocket, zone: &Zone, log: &Mutex<Vec<Asked>>) {
+/// One thread per query, so a zone that takes its time doesn't hold up the others.
+fn serve_udp(socket: UdpSocket, zone: Arc<Zone>, log: Arc<Mutex<Vec<Asked>>>) {
     let at = socket.local_addr().unwrap().ip();
+    let socket = Arc::new(socket);
     let mut buf = [0; 4096];
     while let Ok((n, from)) = socket.recv_from(&mut buf) {
-        if let Some(out) = answer(&buf[..n], at, false, zone, log) {
-            let _ = socket.send_to(&out, from);
-        }
+        let (socket, zone, log) = (Arc::clone(&socket), Arc::clone(&zone), Arc::clone(&log));
+        let query = buf[..n].to_vec();
+        thread::spawn(move || {
+            if let Some(out) = answer(&query, at, false, &*zone, &log) {
+                let _ = socket.send_to(&out, from);
+            }
+        });
     }
 }
 
@@ -179,11 +185,37 @@ pub fn record(owner: &str, ttl: u32, data: RData) -> Record {
     Record::from_rdata(name(owner), ttl, data)
 }
 
-fn soa(zone: &str) -> Record {
+/// The zones the stub serves; a name belongs to the longest one it ends in. The ones under
+/// example.org each show one way a zone's nameservers can go wrong.
+pub const ZONES: [&str; 14] = [
+    "example.com",
+    "example.net",
+    "example.org",
+    "apex.example.net",
+    "wild.example.org",
+    "serial.example.org",
+    "geo.example.org",
+    "noaa.example.org",
+    "lamefail.example.org",
+    "lamerefused.example.org",
+    "slow.example.org",
+    "single.example.org",
+    "in-addr.arpa",
+    "ip6.arpa",
+];
+
+pub fn zone_of(name: &str) -> Option<&'static str> {
+    ZONES
+        .into_iter()
+        .filter(|z| name == *z || name.ends_with(&format!(".{z}")))
+        .max_by_key(|z| z.len())
+}
+
+pub fn soa(zone: &str, serial: u32) -> Record {
     let soa = SOA::new(
         name(&format!("ns1.{zone}")),
         name(&format!("hostmaster.{zone}")),
-        2026103001,
+        serial,
         7200,
         3600,
         1209600,
@@ -199,17 +231,27 @@ fn raw(t: RecordType, bytes: &[u8]) -> RData {
     }
 }
 
-/// The names under example.com, example.net and example.org and their records: one of each
-/// `lookup` type, a CNAME, a TXT set too big for UDP, and names that fail every way.
-pub fn records(owner: &str, t: RecordType) -> Option<Vec<Record>> {
+/// `owner`'s records of type `t` as the server at `at` holds them (`None`: as a resolver sees
+/// them); `None` when the name doesn't exist, `[]` when it has no such records.
+pub fn records(owner: &str, t: RecordType, at: Option<IpAddr>) -> Option<Vec<Record>> {
     use RecordType as T;
     let rec = |ttl, data| vec![record(owner, ttl, data)];
+    let a = |ip: [u8; 4]| rec(300, RData::A(A(Ipv4Addr::from(ip))));
+    let cname = |target: &str| rec(300, RData::CNAME(CNAME(name(target))));
     let svcb = |priority, target: &str| {
         let alpn = SvcParamValue::Alpn(Alpn(vec!["h2".into(), "h3".into()]));
         SVCB::new(priority, name(target), vec![(SvcParamKey::Alpn, alpn)])
     };
+    let zone = zone_of(owner);
+    let apex = zone == Some(owner);
+    let v6 = at.is_some_and(|ip| ip.is_ipv6());
+    let chain = owner
+        .strip_prefix('c')
+        .and_then(|rest| rest.strip_suffix(".example.com"))
+        .and_then(|n| n.parse::<u8>().ok())
+        .filter(|n| (1..=10).contains(n));
     let found = match (owner, t) {
-        ("example.com", T::A) => rec(300, RData::A(A(Ipv4Addr::new(192, 0, 2, 10)))),
+        ("example.com", T::A) => a([192, 0, 2, 10]),
         ("example.com", T::AAAA) => rec(
             300,
             RData::AAAA(AAAA(Ipv6Addr::from_str("2001:db8::10").unwrap())),
@@ -217,10 +259,6 @@ pub fn records(owner: &str, t: RecordType) -> Option<Vec<Record>> {
         ("example.com", T::MX) => vec![
             record(owner, 3600, RData::MX(MX::new(20, name("mx2.example.net")))),
             record(owner, 3600, RData::MX(MX::new(10, name("mx1.example.net")))),
-        ],
-        ("example.com", T::NS) => vec![
-            record(owner, 86400, RData::NS(NS(name("ns1.example.net")))),
-            record(owner, 86400, RData::NS(NS(name("ns2.example.net")))),
         ],
         ("example.com", T::TXT) => rec(
             300,
@@ -238,19 +276,22 @@ pub fn records(owner: &str, t: RecordType) -> Option<Vec<Record>> {
                 vec![],
             )),
         ),
-        ("example.com", T::SOA) => vec![soa("example.com")],
         ("example.com", T::HTTPS) => rec(300, RData::HTTPS(HTTPS(svcb(1, ".")))),
         ("example.com", T::DS) => rec(86400, raw(T::DS, &[0x30, 0x39, 13, 2, 0xab, 0xcd])),
         ("example.com", T::DNSKEY) => rec(3600, raw(T::DNSKEY, &[1, 1, 3, 13, 1, 2, 3])),
-        ("www.example.com", T::CNAME) => rec(300, RData::CNAME(CNAME(name("example.com")))),
-        ("www.example.com", T::A) => vec![
-            record(owner, 300, RData::CNAME(CNAME(name("example.com")))),
-            record(
-                "example.com",
-                300,
-                RData::A(A(Ipv4Addr::new(192, 0, 2, 10))),
-            ),
-        ],
+        ("example.org", T::DS) => rec(86400, raw(T::DS, &[0x01, 0x02, 5, 1, 0xab])),
+        ("example.org", T::DNSKEY) => rec(3600, raw(T::DNSKEY, &[1, 1, 3, 5, 1, 2, 3])),
+        ("www.example.com" | "apex.example.net", T::CNAME) => cname("example.com"),
+        ("loop1.example.com", T::CNAME) => cname("loop2.example.com"),
+        ("loop2.example.com", T::CNAME) => cname("loop1.example.com"),
+        ("dangling.example.com", T::CNAME) => cname("gone.example.net"),
+        (_, T::CNAME) if chain.is_some_and(|n| n < 10) => {
+            cname(&format!("c{}.example.com", chain.unwrap_or(0) + 1))
+        }
+        ("bogus.example.com", T::A) => a([192, 0, 2, 50]),
+        (_, T::A) if chain == Some(10) => a([192, 0, 2, 10]),
+        ("ns1.example.net", T::A) => rec(3600, RData::A(A(Ipv4Addr::LOCALHOST))),
+        ("ns2.example.net", T::AAAA) => rec(3600, RData::AAAA(AAAA(Ipv6Addr::LOCALHOST))),
         ("_sip._tcp.example.com", T::SRV) => rec(
             300,
             RData::SRV(SRV::new(10, 5, 5060, name("sip.example.com"))),
@@ -273,15 +314,36 @@ pub fn records(owner: &str, t: RecordType) -> Option<Vec<Record>> {
                 )
             })
             .collect(),
+        (_, T::SOA) if apex => {
+            let serial = match owner == "serial.example.org" && v6 {
+                true => 2026103002,
+                false => 2026103001,
+            };
+            vec![soa(owner, serial)]
+        }
+        ("single.example.org", T::NS) => rec(86400, RData::NS(NS(name("ns1.example.net")))),
+        (_, T::NS) if apex => vec![
+            record(owner, 86400, RData::NS(NS(name("ns1.example.net")))),
+            record(owner, 86400, RData::NS(NS(name("ns2.example.net")))),
+        ],
+        ("geo.example.org", T::A) if v6 => a([192, 0, 2, 42]),
+        ("geo.example.org", T::A) => a([192, 0, 2, 41]),
+        (_, T::A) if zone.is_some_and(|z| z.ends_with(".example.org")) => a([192, 0, 2, 30]),
+        // A wildcard: every name under wild.example.org exists.
+        _ if zone == Some("wild.example.org") || apex || chain.is_some() => Vec::new(),
         (
-            "example.com"
-            | "www.example.com"
+            "www.example.com"
+            | "loop1.example.com"
+            | "loop2.example.com"
+            | "dangling.example.com"
+            | "bogus.example.com"
+            | "noaddr.example.com"
+            | "ns1.example.net"
+            | "ns2.example.net"
             | "_sip._tcp.example.com"
             | "_443._tcp.example.com"
             | "_dns.example.com"
             | "big.example.com"
-            | "example.net"
-            | "example.org"
             | "10.2.0.192.in-addr.arpa",
             _,
         ) => Vec::new(),
@@ -290,19 +352,41 @@ pub fn records(owner: &str, t: RecordType) -> Option<Vec<Record>> {
     Some(found)
 }
 
+/// The answer to `t` at `name`: its records, or the CNAME chain to them when `chase` is set
+/// (as a resolver does); a loop gives SERVFAIL. Also the last name asked, for the SOA.
+fn resolve(
+    name: &str,
+    t: RecordType,
+    at: Option<IpAddr>,
+    chase: bool,
+) -> (ResponseCode, Vec<Record>, String) {
+    let mut answers = Vec::new();
+    let mut name = name.to_string();
+    for _ in 0..16 {
+        let Some(found) = records(&name, t, at) else {
+            return (ResponseCode::NXDomain, answers, name);
+        };
+        if !found.is_empty() || t == RecordType::CNAME {
+            answers.extend(found);
+            return (ResponseCode::NoError, answers, name);
+        }
+        let cname = records(&name, RecordType::CNAME, at).unwrap_or_default();
+        let Some(RData::CNAME(target)) = cname.first().map(|r| r.data.clone()) else {
+            return (ResponseCode::NoError, answers, name);
+        };
+        answers.extend(cname);
+        name = target.0.to_ascii().trim_end_matches('.').to_string();
+        if !chase {
+            return (ResponseCode::NoError, answers, name);
+        }
+    }
+    (ResponseCode::ServFail, Vec::new(), name)
+}
+
 /// The fixture zones, answered as a resolver (RD on: AD for example.com) or as their
-/// authoritative server (RD off: AA). `servfail.`, `refused.` and `silent.` names fail.
+/// authoritative servers 127.0.0.1 and ::1 (RD off: AA). `servfail.`, `refused.` and
+/// `silent.` names fail everywhere; the zones under example.org fail at ::1 as named.
 pub fn fixtures(a: &Asked) -> Option<Reply> {
-    let zone = [
-        "example.com",
-        "example.net",
-        "example.org",
-        "in-addr.arpa",
-        "ip6.arpa",
-    ]
-    .into_iter()
-    .find(|z| a.name == *z || a.name.ends_with(&format!(".{z}")))
-    .unwrap_or("example.com");
     let failed = |rcode| Reply {
         rcode,
         ..Reply::default()
@@ -313,23 +397,32 @@ pub fn fixtures(a: &Asked) -> Option<Reply> {
         Some("refused") => return Some(failed(ResponseCode::Refused)),
         _ => {}
     }
-    let base = Reply {
-        aa: !a.rd,
-        ad: a.rd && zone == "example.com",
-        ..Reply::default()
-    };
-    Some(match records(&a.name, a.qtype) {
-        Some(_) if a.name == "big.example.com" && !a.tcp => Reply { tc: true, ..base },
-        Some(answers) if answers.is_empty() => Reply {
-            authorities: vec![soa(zone)],
-            ..base
+    let zone = zone_of(&a.name).unwrap_or("example.com");
+    let at = (!a.rd).then_some(a.at);
+    if a.name == "bogus.example.com" && a.rd && !a.cd {
+        return Some(failed(ResponseCode::ServFail));
+    }
+    if at.is_some_and(|ip| ip.is_ipv6()) {
+        match zone {
+            "slow.example.org" => return None,
+            "lamefail.example.org" => return Some(failed(ResponseCode::ServFail)),
+            "lamerefused.example.org" => return Some(failed(ResponseCode::Refused)),
+            _ => {}
+        }
+    }
+    let (rcode, answers, last) = resolve(&a.name, a.qtype, at, a.rd);
+    let tc = a.name == "big.example.com" && !a.tcp && rcode == ResponseCode::NoError;
+    let empty = answers.is_empty();
+    Some(Reply {
+        rcode,
+        answers: if tc { Vec::new() } else { answers },
+        authorities: match empty {
+            true => vec![soa(zone_of(&last).unwrap_or("example.com"), 2026103001)],
+            false => Vec::new(),
         },
-        Some(answers) => Reply { answers, ..base },
-        None => Reply {
-            rcode: ResponseCode::NXDomain,
-            authorities: vec![soa(zone)],
-            ..base
-        },
+        aa: !a.rd && !(zone == "noaa.example.org" && a.at.is_ipv6()),
+        ad: a.rd && !a.cd && zone == "example.com",
+        tc,
     })
 }
 

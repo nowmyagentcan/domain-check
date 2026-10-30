@@ -5,6 +5,7 @@
 use std::fmt;
 use std::io::{ErrorKind, Write};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -337,6 +338,53 @@ fn raw(t: RecordType, b: &[u8]) -> String {
 /// The records of type `t` in an answer.
 pub fn records(m: &Message, t: RecordType) -> impl Iterator<Item = &Record> {
     m.answers.iter().filter(move |r| r.record_type() == t)
+}
+
+/// A name as reports write it: lower case, no trailing dot.
+pub fn name(n: &Name) -> String {
+    n.to_ascii().trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// The target of `owner`'s CNAME in an answer.
+pub fn cname(m: &Message, owner: &str) -> Option<String> {
+    m.answers.iter().find_map(|r| match &r.data {
+        RData::CNAME(target) if name(&r.name) == owner => Some(name(&target.0)),
+        _ => None,
+    })
+}
+
+/// What a query got: the response, or why none came.
+pub type Answer = Result<Message, Failure>;
+
+/// Runs the futures together on this thread's runtime; their outputs in order.
+pub async fn join<F>(futures: impl IntoIterator<Item = F>) -> Vec<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let tasks: Vec<_> = futures.into_iter().map(tokio::spawn).collect();
+    let mut out = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        match task.await {
+            Ok(v) => out.push(v),
+            // A task fails only by panicking, and panics abort in release builds.
+            Err(e) => std::panic::resume_unwind(e.into_panic()),
+        }
+    }
+    out
+}
+
+/// Asks the resolver for several types of one name, up to 8 at a time.
+pub async fn lookups(r: &Arc<Resolver>, name: &str, types: &[RecordType]) -> Vec<Answer> {
+    let mut out = Vec::with_capacity(types.len());
+    for chunk in types.chunks(8) {
+        let asks = chunk.iter().map(|&t| {
+            let (r, name) = (Arc::clone(r), name.to_string());
+            async move { r.lookup(&name, t).await }
+        });
+        out.extend(join(asks).await);
+    }
+    out
 }
 
 #[cfg(test)]

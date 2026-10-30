@@ -1,9 +1,14 @@
 use std::net::SocketAddr;
 
+pub mod check;
 pub mod dns;
 pub mod input;
 pub mod lookup;
 pub mod report;
+pub mod sections {
+    pub mod dns;
+}
+pub mod text;
 
 /// The `publication` stamp of the bundled IANA RDAP bootstrap file, `data/rdap-dns.json`.
 pub const RDAP_BOOTSTRAP: &str = "2026-10-28T22:00:04Z";
@@ -38,6 +43,14 @@ impl Error {
     pub fn usage(message: impl Into<String>, hint: impl Into<String>) -> Error {
         Error::new("usage", message, hint)
     }
+}
+
+/// A runtime for this thread's network work.
+pub fn runtime() -> Result<tokio::runtime::Runtime, Error> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| Error::new("runtime", format!("Couldn't start: {e}."), "Try again."))
 }
 
 /// The ports used instead of 53, 80 and 443 when the destination is a loopback address

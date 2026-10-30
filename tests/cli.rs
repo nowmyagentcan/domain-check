@@ -213,7 +213,7 @@ fn usage_errors_are_exit_2_with_what_and_how() {
     assert!(stub.queries().is_empty());
     for args in [
         &["lookup", "example.com", "--nope"][..],
-        &["frobnicate"],
+        &["example.com", "--frobnicate"],
         &["lookup"],
     ] {
         let (code, _, err) = run(args, &[]);

@@ -2,11 +2,12 @@ mod common;
 
 use std::net::SocketAddr;
 
-use common::{DnsStub, closed_udp_port};
+use common::{DnsStub, closed_udp_port, json};
 use domain_check::Ports;
 use domain_check::dns::{
     Ask, Failure, Message, RECURSIVE, RecordType, Resolver, ResponseCode, records, value,
 };
+use serde_json::{Value, json as j};
 
 const AUTHORITATIVE: Ask = Ask {
     rd: false,
@@ -127,4 +128,196 @@ fn a_closed_port_fails_without_an_answer() {
     let r = Resolver::new(Some(closed_udp_port()), Ports::default(), false).unwrap();
     let e = block_on(r.lookup("example.com", RecordType::A)).unwrap_err();
     assert!(matches!(e, Failure::Timeout | Failure::Refused), "{e:?}");
+}
+
+/// `check <domain> --checks dns` against the stub: the exit code and the domain's report.
+fn dns_report(stub: &DnsStub, domain: &str) -> (i32, Value) {
+    let (code, v) = json(&[domain, "--checks", "dns", "--dns", &stub.addr()], &[]);
+    (code, v["reports"][0].clone())
+}
+
+fn codes(report: &Value) -> Vec<&str> {
+    let findings = report["findings"].as_array().unwrap();
+    findings
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect()
+}
+
+/// The finding with this code: its severity, message and hint.
+fn finding<'a>(report: &'a Value, code: &str) -> (&'a str, &'a str, &'a Value) {
+    let findings = report["findings"].as_array().unwrap();
+    let f = findings.iter().find(|f| f["code"] == code).unwrap();
+    let text = |k: &str| f[k].as_str().unwrap();
+    (text("severity"), text("message"), &f["hint"])
+}
+
+#[test]
+fn the_dns_section_lists_every_record_type_with_ttls() {
+    let stub = DnsStub::new();
+    let (code, r) = dns_report(&stub, "example.com");
+    assert_eq!(code, 0, "{r}");
+    let dns = &r["dns"];
+    let rr = |value: &str, ttl| j!({ "value": value, "ttl": ttl });
+    let soa = "ns1.example.com hostmaster.example.com 2026103001 7200 3600 1209600 300";
+    let records = j!({
+        "A": [rr("192.0.2.10", 300)],
+        "AAAA": [rr("2001:db8::10", 300)],
+        "CNAME": [],
+        "MX": [rr("20 mx2.example.net", 3600), rr("10 mx1.example.net", 3600)],
+        "NS": [rr("ns1.example.net", 86400), rr("ns2.example.net", 86400)],
+        "TXT": [rr("v=spf1 ip4:192.0.2.0/24 -all", 300)],
+        "CAA": [rr("0 issue \"letsencrypt.org\"", 3600)],
+        "SOA": [rr(soa, 3600)],
+        "HTTPS": [rr("1 . alpn=h2,h3", 300)],
+        "DS": [rr("12345 13 2 abcd", 86400)],
+        "DNSKEY": [rr("257 3 13 AQID", 3600)],
+    });
+    assert_eq!(dns["records"], records);
+    assert_eq!((&dns["status"], &dns["reason"]), (&j!("ok"), &Value::Null));
+    assert_eq!(dns["resolver"], stub.addr());
+    assert_eq!(
+        (&dns["exists"], &dns["zone"], &dns["errors"]),
+        (&j!(true), &j!("example.com"), &j!({}))
+    );
+    assert_eq!(dns["cname_chain"], j!([]));
+    let caa = j!({ "found_at": "example.com", "records": ["0 issue \"letsencrypt.org\""] });
+    assert_eq!(dns["caa"], caa);
+    assert!(codes(&r).is_empty());
+    // The JSON keeps the record types in the documented order.
+    let args = ["example.com", "-c", "dns", "--dns", &stub.addr(), "--json"];
+    let (_, out, _) = common::run(&args, &[]);
+    let order = [
+        "\"A\":",
+        "\"AAAA\":",
+        "\"CNAME\":",
+        "\"MX\":",
+        "\"DNSKEY\":",
+    ];
+    let at: Vec<_> = order.iter().map(|k| out.find(k).unwrap()).collect();
+    assert!(at.is_sorted(), "{out}");
+}
+
+#[test]
+fn cname_chains_are_followed_and_caa_found_at_a_parent() {
+    let stub = DnsStub::new();
+    let (code, r) = dns_report(&stub, "www.example.com");
+    assert_eq!(code, 0);
+    let dns = &r["dns"];
+    assert_eq!(dns["cname_chain"], j!(["www.example.com", "example.com"]));
+    assert_eq!(dns["zone"], "example.com");
+    assert_eq!(dns["caa"]["found_at"], "example.com");
+    assert_eq!(dns["records"]["CNAME"][0]["value"], "example.com");
+    assert_eq!(dns["records"]["A"][0]["value"], "192.0.2.10");
+    assert!(codes(&r).is_empty());
+
+    let (code, r) = dns_report(&stub, "c1.example.com");
+    assert_eq!(code, 0, "warnings don't change the exit code");
+    let chain = r["dns"]["cname_chain"].as_array().unwrap();
+    assert_eq!((chain.len(), &chain[8]), (9, &j!("c9.example.com")));
+    let message =
+        "The CNAME chain for c1.example.com has more than 8 steps; some resolvers stop at 8.";
+    let hint = j!("Point the name closer to its final target.");
+    assert_eq!(finding(&r, "cname_chain_long"), ("warning", message, &hint));
+    let (_, r) = dns_report(&stub, "c3.example.com");
+    assert_eq!(r["dns"]["cname_chain"].as_array().unwrap().len(), 8);
+    assert!(codes(&r).is_empty());
+}
+
+#[test]
+fn broken_cnames_are_errors_or_warnings() {
+    let stub = DnsStub::new();
+    let (code, r) = dns_report(&stub, "loop1.example.com");
+    assert_eq!(code, 1);
+    let message =
+        "The CNAME chain loops: loop1.example.com → loop2.example.com → loop1.example.com.";
+    let hint = j!("Point one of the names at a real address.");
+    assert_eq!(finding(&r, "cname_loop"), ("error", message, &hint));
+
+    let (code, r) = dns_report(&stub, "dangling.example.com");
+    assert_eq!(code, 0);
+    assert_eq!(r["dns"]["exists"], true);
+    let message =
+        "dangling.example.com is a CNAME for gone.example.net, which doesn't exist (NXDOMAIN).";
+    let hint = j!(
+        "If you no longer use that service, delete the CNAME: someone else could claim gone.example.net."
+    );
+    assert_eq!(finding(&r, "dangling_cname"), ("warning", message, &hint));
+    let chain = j!(["dangling.example.com", "gone.example.net"]);
+    assert_eq!(r["dns"]["cname_chain"], chain);
+
+    let (code, r) = dns_report(&stub, "apex.example.net");
+    assert_eq!((code, &r["dns"]["zone"]), (1, &j!("apex.example.net")));
+    let message = "apex.example.net is the zone apex and also has a CNAME, which DNS doesn't allow (RFC 1034 §3.6.2).";
+    let hint = j!("Use A/AAAA records, or your DNS host's ALIAS/flattening feature.");
+    assert_eq!(finding(&r, "cname_at_apex"), ("error", message, &hint));
+}
+
+#[test]
+fn missing_names_records_and_caa_are_reported() {
+    let stub = DnsStub::new();
+    let (code, r) = dns_report(&stub, "nope.example.com");
+    assert_eq!(code, 1);
+    let dns = &r["dns"];
+    assert_eq!(
+        (&dns["exists"], &dns["zone"], &dns["caa"]),
+        (&j!(false), &j!("example.com"), &Value::Null)
+    );
+    let records = dns["records"].as_object().unwrap();
+    assert_eq!(records.len(), 11);
+    assert!(records.values().all(|v| v == &j!([])));
+    let message = "nope.example.com doesn't exist in DNS (NXDOMAIN).";
+    let hint = j!("Check the spelling; Registration shows whether it is registered.");
+    assert_eq!(finding(&r, "nxdomain"), ("error", message, &hint));
+    assert_eq!(codes(&r), ["nxdomain"]);
+
+    let (code, r) = dns_report(&stub, "noaddr.example.com");
+    assert_eq!(code, 0);
+    let message = "noaddr.example.com has no A or AAAA record, so it has no website address.";
+    assert_eq!(finding(&r, "no_address"), ("info", message, &Value::Null));
+    assert_eq!(r["dns"]["caa"]["found_at"], "example.com");
+
+    let before = stub.queries().len();
+    let (code, r) = dns_report(&stub, "example.net");
+    assert_eq!(code, 0);
+    let message =
+        "No CAA record: any certificate authority may issue certificates for example.net.";
+    let hint = j!("Add one naming your CA, e.g. 0 issue \"letsencrypt.org\".");
+    assert_eq!(finding(&r, "no_caa"), ("info", message, &hint));
+    let caa: Vec<_> = stub.queries()[before..]
+        .iter()
+        .filter(|q| q.qtype == RecordType::CAA)
+        .map(|q| q.name.clone())
+        .collect();
+    assert_eq!(caa, ["example.net"], "the climb stops before the TLD");
+}
+
+#[test]
+fn servfail_is_an_error_with_the_failed_types() {
+    let stub = DnsStub::new();
+    let (code, r) = dns_report(&stub, "servfail.example.com");
+    assert_eq!(code, 1);
+    let dns = &r["dns"];
+    assert_eq!((&dns["status"], &dns["zone"]), (&j!("ok"), &Value::Null));
+    let errors = dns["errors"].as_object().unwrap();
+    assert_eq!(errors.len(), 11);
+    assert!(errors.values().all(|e| e == "SERVFAIL"));
+    let message = "The resolver couldn't get an answer for servfail.example.com (SERVFAIL).";
+    let hint = j!("Its nameservers may be down or its DNSSEC broken; see Propagation and DNSSEC.");
+    assert_eq!(finding(&r, "dns_servfail"), ("error", message, &hint));
+}
+
+#[test]
+fn a_silent_resolver_makes_the_section_unavailable() {
+    let stub = DnsStub::start(|_| None);
+    let (code, r) = dns_report(&stub, "example.com");
+    assert_eq!(code, 3);
+    let reason = format!("Couldn't reach the DNS resolver {}: timeout.", stub.addr());
+    let dns = &r["dns"];
+    assert_eq!(
+        (&dns["status"], &dns["reason"]),
+        (&j!("unavailable"), &j!(reason))
+    );
+    assert_eq!(dns["records"], Value::Null);
+    assert!(codes(&r).is_empty());
 }
