@@ -876,6 +876,10 @@ impl Walk {
                         (*text, Some(*mech), *domain)
                     }
                     Term::Redirect { text, domain } if !has_all => (*text, None, Some(*domain)),
+                    // Terms after `all` are never evaluated (RFC 7208 §5.1).
+                    Term::Directive {
+                        mech: Mech::All, ..
+                    } => break,
                     _ => continue,
                 };
                 if self.lookups >= CAP || self.capped {

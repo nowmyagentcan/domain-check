@@ -1500,7 +1500,6 @@ fn mx_hosts_without_addresses_are_void_lookups() {
 }
 
 #[test]
-#[ignore = "known bug: DC11"]
 fn terms_after_all_are_never_evaluated() {
     let stub = DnsStub::new();
     let (code, r) = email(&stub, "afterall.example.net", &[]);
