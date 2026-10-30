@@ -1,0 +1,70 @@
+# Monthly: compares the bundled IANA RDAP bootstrap and the DNS and HTTP crates with upstream,
+# and checks real domains once. Opens one issue per stale or failing item; updating stays a
+# reviewed commit and a patch release.
+name: data-check
+on:
+  schedule:
+    - cron: '0 6 1 * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+jobs:
+  data:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compare with upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          stale() {
+            if gh issue list --state open --limit 500 --json title --jq '.[].title' | grep -qxF "$1"; then
+              echo "open already: $1"
+            else
+              gh issue create --title "$1" --body "$2"
+            fi
+          }
+          agent='domain-check data-check (+https://github.com/nowmyagentcan/domain-check)'
+          have=$(sed -n 's/^pub const RDAP_BOOTSTRAP: &str = "\(.*\)";/\1/p' src/lib.rs)
+          latest=$(curl -fsS -A "$agent" https://data.iana.org/rdap/dns.json | jq -r .publication)
+          test -n "$have" && test -n "$latest"
+          echo "RDAP bootstrap: bundled $have, IANA $latest"
+          [ "$have" = "$latest" ] || stale "Data update: RDAP bootstrap $latest" \
+            "Bundled: $have. Replace data/rdap-dns.json with https://data.iana.org/rdap/dns.json, set RDAP_BOOTSTRAP in src/lib.rs to its publication, run the tests, commit, and release a patch version."
+          for c in ureq hickory-resolver; do
+            have=$(sed -n "/^name = \"$c\"$/{n;s/^version = \"\(.*\)\"/\1/p}" Cargo.lock)
+            latest=$(curl -fsS -A "$agent" "https://crates.io/api/v1/crates/$c" | jq -r .crate.max_stable_version)
+            echo "$c: locked $have, latest $latest"
+            [ "$have" = "$latest" ] || stale "Data update: $c $latest" \
+              "Locked: $have. Read its changelog, bump it in Cargo.toml (ureq is pinned exactly for its resolver API; hickory-net and hickory-proto move with hickory-resolver), run the tests and the live tests, commit, and release a patch version."
+          done
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked
+      - name: Check real domains
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          stale() {
+            if gh issue list --state open --limit 500 --json title --jq '.[].title' | grep -qxF "$1"; then
+              echo "open already: $1"
+            else
+              gh issue create --title "$1" --body "$2"
+            fi
+          }
+          live() {
+            domain=$1 checks=$2
+            out=$(target/release/domain-check "$domain" --checks "$checks" --json || true)
+            for s in ${checks//,/ }; do
+              status=$(jq -r ".reports[0].$s.status" <<< "$out")
+              echo "$domain $s: $status"
+              [ "$status" = ok ] || stale "Live check failed: $s" \
+                "\`domain-check $domain --checks $s\` gave status \`$status\`: $(jq -r ".reports[0].$s.reason" <<< "$out") Run it again with --debug; if the service changed, update src/sections and the tests."
+            done
+          }
+          live example.com dns,rdap,tls
+          live gmail.com email
