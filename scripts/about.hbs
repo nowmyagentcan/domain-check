@@ -1,0 +1,12 @@
+domain-check uses the following third-party software.
+{{#each licenses}}
+
+================================================================================
+{{name}}, used by:
+{{#each used_by}}
+  {{crate.name}} {{crate.version}}
+{{/each}}
+--------------------------------------------------------------------------------
+
+{{{text}}}
+{{/each}}

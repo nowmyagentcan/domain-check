@@ -1,0 +1,175 @@
+# A v* tag builds every target into a draft release with SHA256SUMS and build attestations.
+# Running it by hand (workflow_dispatch) builds and smoke-tests the same archives and stops there.
+name: release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { os: windows-latest, target: windows-x64, triple: x86_64-pc-windows-msvc }
+          - { os: macos-latest, target: macos-arm64, triple: aarch64-apple-darwin }
+          - { os: macos-15-intel, target: macos-x64, triple: x86_64-apple-darwin }
+          - { os: ubuntu-latest, target: linux-x64, triple: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: linux-arm64, triple: aarch64-unknown-linux-musl }
+    runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: ${{ matrix.target == 'windows-x64' && '-C target-feature=+crt-static' || '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked --target ${{ matrix.triple }}
+      - name: Sign (off until certificates exist; add the secrets, then remove the if)
+        if: false
+        shell: bash
+        run: echo "signtool on Windows, codesign and notarytool on macOS"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: target/${{ matrix.triple }}/release/domain-check${{ runner.os == 'Windows' && '.exe' || '' }}
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+      - uses: actions/download-artifact@v8
+        with:
+          path: bin
+      - name: Archive
+        run: |
+          v=v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
+          [ "$GITHUB_REF_TYPE" != tag ] || [ "$GITHUB_REF_NAME" = "$v" ]
+          cargo about generate --locked -c scripts/about.toml scripts/about.hbs -o THIRD-PARTY-LICENSES.txt
+          mkdir dist
+          for t in $(ls bin); do
+            n=domain-check-$v-$t
+            mkdir "$n" && cp bin/$t/* LICENSE THIRD-PARTY-LICENSES.txt "$n"/ && chmod +x "$n"/domain-check*
+            cp README.md "$n"/ 2>/dev/null || [ "$GITHUB_REF_TYPE" != tag ]
+            if [ "$t" = windows-x64 ]; then (cd "$n" && zip -q ../dist/"$n".zip *)
+            else (cd "$n" && tar -czf ../dist/"$n".tar.gz *); fi
+          done
+          for f in install.sh install.ps1; do sed "s/@VERSION@/$v/g" scripts/$f > dist/$f; done
+          cd dist && sha256sum * > SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/*
+  smoke:
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: windows-x64 }
+          - { os: macos-latest, target: macos-arm64 }
+          - { os: macos-15-intel, target: macos-x64 }
+          - { os: ubuntu-latest, target: linux-x64 }
+          - { os: ubuntu-24.04-arm, target: linux-arm64 }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - name: Run the archive
+        run: |
+          mkdir x && cd x
+          if [ ${{ matrix.target }} = windows-x64 ]; then
+            unzip -q ../dist/*-windows-x64.zip
+            if grep -qiaE 'vcruntime|api-ms-win-crt' domain-check.exe; then echo 'needs the VC++ runtime'; exit 1; fi
+          else
+            tar -xzf ../dist/*-${{ matrix.target }}.tar.gz
+            if [ "$RUNNER_OS" = Linux ]; then file domain-check | grep -E 'static(-pie|ally) linked'; fi
+          fi
+          test -s LICENSE && test -s THIRD-PARTY-LICENSES.txt
+          ./domain-check --version | grep -x 'domain-check [0-9.]*'
+      - name: Copy the files with wrong checksums
+        run: mkdir bad && cp dist/* bad/ && sed -i.bak 's/^./x/' bad/SHA256SUMS
+      # The installers are tested here, on throwaway runners, because they edit the user's PATH.
+      - name: install.sh with sh, bash and zsh
+        if: runner.os != 'Windows'
+        run: |
+          python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &
+          sleep 2
+          if DOMAIN_CHECK_BASE=http://127.0.0.1:8765/bad sh dist/install.sh; then exit 1; fi
+          test ! -e ~/.local/bin/domain-check
+          for s in sh bash zsh; do
+            command -v $s >/dev/null || continue
+            rm -f ~/.local/bin/domain-check
+            DOMAIN_CHECK_BASE=http://127.0.0.1:8765/dist $s dist/install.sh
+          done
+          ~/.local/bin/domain-check --version
+      - name: install.ps1 with Windows PowerShell and PowerShell 7
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Start-Process python '-m http.server 8765 --bind 127.0.0.1' -WindowStyle Hidden
+          Start-Sleep 2
+          $dir = "$env:LOCALAPPDATA\Programs\domain-check"
+          $env:DOMAIN_CHECK_BASE = 'http://127.0.0.1:8765/bad'
+          powershell -NoProfile -File dist/install.ps1
+          if (!$LASTEXITCODE -or (Test-Path $dir)) { throw 'installed despite wrong checksums' }
+          $env:DOMAIN_CHECK_BASE = 'http://127.0.0.1:8765/dist'
+          foreach ($ps in 'powershell', 'pwsh') {
+            Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+            & $ps -NoProfile -File dist/install.ps1
+            if ($LASTEXITCODE) { throw "install.ps1 failed in $ps" }
+          }
+          # A new shell finds it through the user PATH alone.
+          powershell -NoProfile -Command '$env:Path = [Environment]::GetEnvironmentVariable(''Path'', ''User''); domain-check --version'
+          # Other files in the folder stay.
+          Set-Content "$dir\notes.old" 'kept'
+          powershell -NoProfile -File dist/install.ps1
+          $files = Get-ChildItem $dir -Name
+          if ($LASTEXITCODE -or (Compare-Object $files 'notes.old', 'domain-check.exe')) { throw "left $files" }
+          Remove-Item "$dir\notes.old"
+          # An upgrade from an archive without the exe, or with one that doesn't run, keeps the installed one.
+          $zip = (Get-Item dist/*-windows-x64.zip).Name
+          New-Item -ItemType Directory missing, invalid, payload | Out-Null
+          Compress-Archive dist/SHA256SUMS "missing/$zip"
+          [IO.File]::WriteAllBytes("$PWD/payload/domain-check.exe", [byte[]](0, 1, 2, 3))
+          Compress-Archive payload/domain-check.exe "invalid/$zip"
+          foreach ($case in 'missing', 'invalid') {
+            "$((Get-FileHash "$case/$zip").Hash)  $zip" | Set-Content "$case/SHA256SUMS"
+            $env:DOMAIN_CHECK_BASE = "http://127.0.0.1:8765/$case"
+            powershell -NoProfile -File dist/install.ps1
+            if (!$LASTEXITCODE -or (Get-ChildItem $dir).Count -ne 1) { throw "a failed upgrade ($case) lost domain-check.exe" }
+            & "$dir\domain-check.exe" --version
+            if ($LASTEXITCODE) { throw "domain-check.exe doesn't run after the $case upgrade" }
+          }
+  release:
+    if: github.ref_type == 'tag'
+    needs: smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - uses: actions/attest@v4
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag --title "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
