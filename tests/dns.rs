@@ -779,7 +779,6 @@ fn answers_arrive_while_other_programs_hold_loopback_ports() {
 }
 
 #[test]
-#[ignore = "known bug: DC02"]
 fn txt_values_that_differ_only_in_case_differ() {
     use hickory_proto::rr::rdata::TXT;
     // The nameservers publish the new token; the resolver still has the old one.

@@ -104,9 +104,15 @@ impl Got {
         }
     }
 
-    /// The answer as compared: its code and its values, lower case and sorted.
-    fn key(&self) -> (String, Vec<String>) {
-        let mut values: Vec<_> = self.values.iter().map(|v| v.to_lowercase()).collect();
+    /// The answer to a `t` query as compared: its code and its values sorted, names in lower
+    /// case (RFC 4343); text and key data keep their case.
+    fn key(&self, t: &str) -> (String, Vec<String>) {
+        let exact = ["TXT", "CAA", "DNSKEY", "HTTPS", "SVCB"].contains(&t);
+        let value = |v: &String| match exact && !v.starts_with("CNAME ") {
+            true => v.clone(),
+            false => v.to_lowercase(),
+        };
+        let mut values: Vec<_> = self.values.iter().map(value).collect();
         values.sort();
         (self.rcode.clone(), values)
     }
@@ -290,7 +296,7 @@ pub async fn run(cx: &Cx, facts: &Facts) -> (Section<Propagation>, Vec<Finding>)
             .iter()
             .filter_map(|s| s.answers.get(t))
             .filter(|g| g.rcode == "NOERROR")
-            .map(Got::key)
+            .map(|g| g.key(t))
             .collect();
         if sets.len() > 1 {
             out.varies.push(t.clone());
@@ -309,7 +315,7 @@ pub async fn run(cx: &Cx, facts: &Facts) -> (Section<Propagation>, Vec<Finding>)
             if out.varies.contains(t) || expected.is_empty() {
                 continue;
             }
-            let agrees = expected.iter().any(|g| g.key() == seen.got.key());
+            let agrees = expected.iter().any(|g| g.key(t) == seen.got.key(t));
             seen.agrees = Some(agrees);
             compared = true;
             if !agrees {
