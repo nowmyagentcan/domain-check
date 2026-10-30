@@ -12,6 +12,7 @@ use crate::report::{Check, Finding, Keyed, Section, Severity, Status};
 
 pub mod dkim;
 pub mod dmarc;
+pub mod policy;
 pub mod spf;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -21,6 +22,9 @@ pub struct Email {
     pub spf: Option<spf::Spf>,
     pub dmarc: Option<dmarc::Dmarc>,
     pub dkim: dkim::Dkim,
+    pub mta_sts: Option<policy::MtaSts>,
+    pub tls_rpt: Option<policy::TlsRpt>,
+    pub bimi: Option<policy::Bimi>,
     /// The parts whose lookup failed (`spf`, `dmarc`, …) and why: they show as `null`.
     pub errors: Keyed<String>,
 }
@@ -108,19 +112,29 @@ pub async fn run(cx: &Cx, facts: &Facts) -> (Section<Email>, Vec<Finding>) {
     let spf = tokio::spawn(spf::run(Arc::clone(&mail), cx.spf_ip));
     let dmarc = tokio::spawn(dmarc::run(Arc::clone(&mail)));
     let dkim = tokio::spawn(dkim::run(Arc::clone(&mail), cx.selectors.clone()));
+    let mta_sts = tokio::spawn(policy::mta_sts(Arc::clone(&mail)));
+    let tls_rpt = tokio::spawn(policy::tls_rpt(Arc::clone(&mail)));
+    let bimi = tokio::spawn(policy::bimi(Arc::clone(&mail)));
     let mut g = Gather::default();
     let mx = mx(&mail, facts, &mut g.found).await;
     let spf = g.take("spf", dns::wait(spf).await);
     let dmarc = g.take("dmarc", dns::wait(dmarc).await);
     let (dkim, found) = dns::wait(dkim).await;
     g.found.extend(found);
+    let mta_sts = g.take("mta_sts", dns::wait(mta_sts).await);
+    let tls_rpt = g.take("tls_rpt", dns::wait(tls_rpt).await);
+    let bimi = g.take("bimi", dns::wait(bimi).await);
     let email = Email {
         mx,
         spf,
         dmarc,
         dkim,
+        mta_sts,
+        tls_rpt,
+        bimi,
         errors: g.errors,
     };
+    g.found.extend(policy::across(&email, d));
     (Section::ok(email), g.found)
 }
 

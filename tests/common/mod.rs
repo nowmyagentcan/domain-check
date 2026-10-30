@@ -314,6 +314,24 @@ pub const MAIL: &[(&str, RecordType, &str)] = {
         ("a.b.c.d.e.f.g.h.i.example.net", A, "192.0.2.39"),
         // DKIM keys are made by dkim()
         ("dkim.example.net", A, "192.0.2.40"),
+        // MTA-STS, TLS-RPT and BIMI
+        ("sts.example.net", MX, "10 mx1.example.net"),
+        ("_mta-sts.sts.example.net", TXT, "v=STSv1; id=20261030"),
+        ("_smtp._tls.sts.example.net", TXT, "v=TLSRPTv1; rua=mailto:tls@sts.example.net,https://report.example.net/tls"),
+        ("default._bimi.sts.example.net", TXT, "v=BIMI1; l=https://sts.example.net/logo.svg; a=https://sts.example.net/vmc.pem"),
+        ("_dmarc.sts.example.net", TXT, "v=DMARC1; p=reject; rua=mailto:d@sts.example.net"),
+        ("stsbad.example.net", A, "192.0.2.41"),
+        ("_mta-sts.stsbad.example.net", TXT, "v=STSv1; id=2026-10-30"),
+        ("_mta-sts.stsbad.example.net", TXT, "v=stsv1; id=1"),
+        ("_smtp._tls.stsbad.example.net", TXT, "v=TLSRPTv1; rua=ftp://x.example.net"),
+        ("_smtp._tls.stsbad.example.net", TXT, "v=TLSRPTv1; rua=mailto:a@x.example.net"),
+        ("default._bimi.stsbad.example.net", TXT, "v=BIMI1; l=http://stsbad.example.net/logo.svg; a="),
+        ("stsonly.example.net", A, "192.0.2.42"),
+        ("_mta-sts.stsonly.example.net", TXT, "v=STSv1; id=1"),
+        ("declined.example.net", A, "192.0.2.43"),
+        ("default._bimi.declined.example.net", TXT, "v=BIMI1; l=;"),
+        ("logo.example.org", A, "192.0.2.44"),
+        ("default._bimi.logo.example.org", TXT, "v=BIMI1; l=https://logo.example.org/l.svg"),
     ]
 };
 

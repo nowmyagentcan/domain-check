@@ -1107,3 +1107,188 @@ fn without_selectors_the_8_common_ones_are_tried() {
         "✗ 'a b' isn't a valid DKIM selector.\n  Use the s= value from a DKIM-Signature header.\n"
     );
 }
+
+#[test]
+fn mta_sts_tls_rpt_and_bimi_records_are_read() {
+    let stub = DnsStub::new();
+    let (_, r) = email(&stub, "sts.example.net", &[]);
+    let e = &r["email"];
+    assert_eq!(
+        (&e["mta_sts"], &e["tls_rpt"], &e["bimi"]),
+        (
+            &j!({ "record": "v=STSv1; id=20261030", "id": "20261030" }),
+            &j!({ "record": "v=TLSRPTv1; rua=mailto:tls@sts.example.net,https://report.example.net/tls",
+                  "rua": ["mailto:tls@sts.example.net", "https://report.example.net/tls"] }),
+            &j!({ "record": "v=BIMI1; l=https://sts.example.net/logo.svg; a=https://sts.example.net/vmc.pem",
+                  "logo": "https://sts.example.net/logo.svg", "certificate": "https://sts.example.net/vmc.pem" }),
+        )
+    );
+    for prefix in ["mta_sts", "tls_rpt", "bimi"] {
+        assert_eq!(found(&r, prefix), [], "{prefix}");
+    }
+    assert_eq!(e["errors"], j!({}));
+    let (_, out, _) = common::run(
+        &["sts.example.net", "-c", "email", "--dns", &stub.addr()],
+        &[],
+    );
+    let line = out.lines().find(|l| l.starts_with("Email")).unwrap();
+    assert_eq!(
+        line,
+        "Email        SPF none · DMARC p=reject · DKIM none of 8 common selectors · MTA-STS yes · TLS-RPT yes · BIMI logo"
+    );
+}
+
+#[test]
+fn broken_policy_records_say_what_is_wrong() {
+    let stub = DnsStub::new();
+    let (_, r) = email(&stub, "stsbad.example.net", &[]);
+    let e = &r["email"];
+    assert_eq!(
+        (&e["mta_sts"]["id"], &e["bimi"]["logo"]),
+        (&j!(null), &j!(null))
+    );
+    assert_eq!(e["tls_rpt"]["rua"], j!(["ftp://x.example.net"]));
+    let mut all = found(&r, "mta_sts");
+    all.extend(found(&r, "tls_rpt"));
+    all.extend(found(&r, "bimi"));
+    assert_eq!(
+        all,
+        [
+            (
+                "mta_sts_syntax",
+                "error",
+                "The _mta-sts record is invalid: it doesn't start with v=STSv1."
+            ),
+            (
+                "mta_sts_syntax",
+                "error",
+                "The _mta-sts record is invalid: it has no valid id= (1 to 32 letters and digits)."
+            ),
+            (
+                "tls_rpt_syntax",
+                "error",
+                "The TLS-RPT record is invalid: there are 2 v=TLSRPTv1 records."
+            ),
+            (
+                "tls_rpt_syntax",
+                "error",
+                "The TLS-RPT record is invalid: ftp://x.example.net isn't a mailto: or https: address."
+            ),
+            (
+                "bimi_syntax",
+                "error",
+                "The BIMI record is invalid: l= isn't https."
+            ),
+            (
+                "bimi_dmarc_not_enforced",
+                "warning",
+                "BIMI logos need DMARC p=quarantine or p=reject without test mode; the policy is p=quarantine; sp=none."
+            ),
+            (
+                "bimi_no_certificate",
+                "info",
+                "No mark certificate (a=); some mailbox providers show BIMI logos only with a VMC or CMC."
+            ),
+        ]
+    );
+    assert_eq!(
+        finding(&r, "mta_sts_syntax").2,
+        "It should look like \"v=STSv1; id=20261030\"."
+    );
+    assert_eq!(
+        finding(&r, "bimi_dmarc_not_enforced").2,
+        "Tighten the DMARC policy first."
+    );
+    let (_, r) = email(&stub, "logo.example.org", &[]);
+    assert_eq!(
+        finding(&r, "bimi_dmarc_not_enforced").1,
+        "BIMI logos need DMARC p=quarantine or p=reject without test mode; the policy is missing."
+    );
+}
+
+#[test]
+fn missing_policies_are_info_unless_mta_sts_needs_reports() {
+    let stub = DnsStub::new();
+    let (_, r) = email(&stub, "declined.example.net", &[]);
+    assert_eq!(
+        found(&r, "mta_sts"),
+        [(
+            "mta_sts_none",
+            "info",
+            "No MTA-STS policy, so servers sending mail to declined.example.net may fall back to unencrypted delivery."
+        )]
+    );
+    assert_eq!(
+        finding(&r, "mta_sts_none").2,
+        "Publish _mta-sts.declined.example.net TXT and a policy at https://mta-sts.declined.example.net/.well-known/mta-sts.txt."
+    );
+    assert_eq!(
+        finding(&r, "tls_rpt_none"),
+        (
+            "info",
+            "No TLS-RPT record, so nobody hears about failed encrypted deliveries.",
+            &j!("Publish _smtp._tls.declined.example.net TXT \"v=TLSRPTv1; rua=mailto:<you>\".")
+        )
+    );
+    assert_eq!(
+        found(&r, "bimi"),
+        [(
+            "bimi_declined",
+            "info",
+            "The BIMI record declines a logo (empty l=)."
+        )]
+    );
+    let (_, r) = email(&stub, "stsonly.example.net", &[]);
+    assert_eq!(finding(&r, "tls_rpt_none").0, "warning");
+    // A domain that takes no mail needs neither.
+    let (_, r) = email(&stub, "nullmx.example.net", &[]);
+    assert_eq!(found(&r, "mta_sts"), []);
+    assert_eq!(found(&r, "tls_rpt"), []);
+    assert_eq!(found(&r, "bimi"), []);
+}
+
+#[test]
+fn email_stays_within_its_budget_when_answers_go_missing() {
+    // Names whose hash falls on 0 never get an answer: about a third of the lookups.
+    let lossy = DnsStub::start(|a| {
+        let seed = u32::from(u16::from(a.qtype));
+        let h = a
+            .name
+            .bytes()
+            .fold(seed, |h, b| h.wrapping_mul(31).wrapping_add(b.into()));
+        if h % 3 == 0 {
+            None
+        } else {
+            common::fixtures(a)
+        }
+    });
+    let started = std::time::Instant::now();
+    let (_, r) = email(
+        &lossy,
+        "spf.example.net",
+        &["-s", "a", "-s", "b", "-s", "c"],
+    );
+    let took = started.elapsed().as_secs_f64();
+    assert!(took < 20.0, "{took} s");
+    assert_eq!(r["email"]["status"], "ok", "{r}");
+    let e = &r["email"];
+    let failed: usize = [
+        e["errors"].as_object().unwrap().len(),
+        e["dkim"]["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|k| k["error"] == "timeout")
+            .count(),
+        e["mx"]["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|h| h["error"] == "timeout")
+            .count(),
+        found(&r, "spf_lookup_failed").len(),
+    ]
+    .iter()
+    .sum();
+    assert!(failed > 0, "{r}");
+}

@@ -304,8 +304,22 @@ fn email(e: &Email) -> String {
         (true, false) => "DKIM none of 8 common selectors".into(),
         (true, true) => format!("DKIM none at {}", e.dkim.selectors.join(", ")),
     };
-    let mut parts = [spf, dmarc, dkim];
-    for (part, name) in parts.iter_mut().zip(["spf", "dmarc"]) {
+    let yes = |found: bool| if found { "yes" } else { "none" };
+    let bimi = match &e.bimi {
+        Some(b) if b.logo.is_some() => "logo",
+        Some(_) => "declined",
+        None => "none",
+    };
+    let mut parts = [
+        spf,
+        dmarc,
+        dkim,
+        format!("MTA-STS {}", yes(e.mta_sts.is_some())),
+        format!("TLS-RPT {}", yes(e.tls_rpt.is_some())),
+        format!("BIMI {bimi}"),
+    ];
+    let names = ["spf", "dmarc", "dkim", "mta_sts", "tls_rpt", "bimi"];
+    for (part, name) in parts.iter_mut().zip(names) {
         if let Some(why) = e.errors.get(name) {
             *part = format!("{} {why}", &part[..part.find(' ').unwrap_or(0)]);
         }
