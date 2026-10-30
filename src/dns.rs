@@ -222,8 +222,12 @@ async fn exchange(
             .first_answer()
             .await
     } else {
+        // A port of hickory's own random choice can be one another program bound on 127.0.0.1
+        // only, and on Windows that socket then takes a loopback server's reply; the OS never
+        // hands out such a port.
         UdpClientStream::builder(to, provider.clone())
             .with_timeout(Some(UDP_TIMEOUT))
+            .with_os_port_selection(true)
             .with_max_retries(1)
             .exchange()
             .send(request)

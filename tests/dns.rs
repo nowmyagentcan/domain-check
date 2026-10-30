@@ -757,3 +757,23 @@ fn varying_types_and_silent_servers_leave_nothing_to_compare() {
     let reason = j!("None of the nameservers or resolvers answered.");
     assert_eq!((&p["status"], &p["reason"]), (&j!("unavailable"), &reason));
 }
+
+/// No client port is one another program bound on 127.0.0.1 only: on Windows that socket would
+/// take the loopback server's answer.
+#[cfg(windows)]
+#[test]
+fn answers_arrive_while_other_programs_hold_loopback_ports() {
+    let stub = DnsStub::new();
+    let held: Vec<_> = (20000..32000)
+        .filter_map(|port| std::net::UdpSocket::bind(("127.0.0.1", port)).ok())
+        .collect();
+    assert!(held.len() > 10_000, "{}", held.len());
+    let dns = stub.addr();
+    let types = "A AAAA CNAME MX NS TXT CAA SOA SRV PTR DS DNSKEY TLSA HTTPS SVCB";
+    let mut args = vec!["lookup", "example.com", "--dns", &dns, "--debug"];
+    args.extend(types.split(' '));
+    for _ in 0..3 {
+        let (_, _, err) = common::run(&args, &[]);
+        assert!(!err.contains(" timeout "), "{err}");
+    }
+}

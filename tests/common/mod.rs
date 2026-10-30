@@ -10,7 +10,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use hickory_proto::op::{Message, OpCode, ResponseCode};
+use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::svcb::{Alpn, SvcParamKey, SvcParamValue};
 use hickory_proto::rr::rdata::{
     A, AAAA, CAA, CNAME, HTTPS, MX, NS, NULL, PTR, SOA, SRV, SVCB, TLSA, TXT,
@@ -107,7 +107,13 @@ fn serve_udp(socket: UdpSocket, zone: Arc<Zone>, log: Arc<Mutex<Vec<Asked>>>) {
     let at = socket.local_addr().unwrap().ip();
     let socket = Arc::new(socket);
     let mut buf = [0; 4096];
-    while let Ok((n, from)) = socket.recv_from(&mut buf) {
+    loop {
+        let (n, from) = match socket.recv_from(&mut buf) {
+            Ok(got) => got,
+            // Windows reports an answer that reached a client already gone on the next read.
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
+            Err(_) => return,
+        };
         let (socket, zone, log) = (Arc::clone(&socket), Arc::clone(&zone), Arc::clone(&log));
         let query = buf[..n].to_vec();
         thread::spawn(move || {
@@ -148,6 +154,9 @@ fn answer(
     let query = Message::from_vec(bytes).ok()?;
     let q = query.queries.first()?.clone();
     let h = &query.metadata;
+    if h.message_type == MessageType::Response {
+        return None;
+    }
     let asked = Asked {
         name: q.name.to_ascii().trim_end_matches('.').to_ascii_lowercase(),
         qtype: q.query_type,
