@@ -10,9 +10,13 @@ use crate::check::{Cx, Facts};
 use crate::dns::{self, Answer, Failure, RecordType, Resolver, ResponseCode};
 use crate::report::{Check, Finding, Section, Severity, Status};
 
+pub mod spf;
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Email {
     pub mx: Mx,
+    /// `None` when the domain has no SPF record.
+    pub spf: Option<spf::Spf>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -54,6 +58,15 @@ impl Mail {
     pub async fn values(&self, name: &str, t: RecordType) -> Found {
         got(&self.ask(name, t).await, t)
     }
+
+    /// The values of each question, asked together.
+    pub async fn all(self: &Arc<Self>, questions: Vec<(String, RecordType)>) -> Vec<Found> {
+        let asks = questions.into_iter().map(|(name, t)| {
+            let m = Arc::clone(self);
+            async move { m.values(&name, t).await }
+        });
+        dns::join(asks).await
+    }
 }
 
 pub fn got(a: &Answer, t: RecordType) -> Found {
@@ -86,9 +99,12 @@ pub async fn run(cx: &Cx, facts: &Facts) -> (Section<Email>, Vec<Finding>) {
         domain: d.to_string(),
         until: cx.until(Check::Email).into(),
     });
+    let spf = tokio::spawn(spf::run(Arc::clone(&mail)));
     let mut found = Vec::new();
     let mx = mx(&mail, facts, &mut found).await;
-    (Section::ok(Email { mx }), found)
+    let (spf, more) = dns::wait(spf).await;
+    found.extend(more);
+    (Section::ok(Email { mx, spf }), found)
 }
 
 /// The MX hosts and their addresses; a domain without MX records gets mail at its own

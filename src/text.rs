@@ -7,6 +7,7 @@ use std::io::IsTerminal;
 use crate::check::Mark;
 use crate::report::{Check, Output, Report, Section, Severity, Status};
 use crate::sections::dns::Dns;
+use crate::sections::email::Email;
 use crate::sections::propagation::Propagation;
 
 fn paint(code: &str, s: &str) -> String {
@@ -127,6 +128,7 @@ pub fn report(r: &Report) -> String {
         s.propagation
             .as_ref()
             .map(|x| (Check::Propagation, line(x, propagation))),
+        s.email.as_ref().map(|x| (Check::Email, line(x, email))),
     ];
     for (check, line) in lines.into_iter().flatten() {
         out += &format!("{}{line}\n", bold(&format!("{:13}", check.title())));
@@ -267,6 +269,18 @@ fn propagation(p: &Propagation) -> String {
         n => out += &format!(" · {n} nameserver addresses didn't answer"),
     }
     out
+}
+
+fn email(e: &Email) -> String {
+    let spf = match &e.spf {
+        Some(s) => format!(
+            "SPF {}, {}/10 lookups",
+            s.all.as_deref().unwrap_or("no all"),
+            s.lookups
+        ),
+        None => "SPF none".into(),
+    };
+    [spf].join(" · ")
 }
 
 #[cfg(test)]

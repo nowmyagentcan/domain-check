@@ -473,6 +473,7 @@ fn the_text_report_puts_findings_first_then_one_line_per_section() {
 
 DNS          A 192.0.2.10 · AAAA 2001:db8::10 · MX 20 mx2.example.net, 10 mx1.example.net · NS ns1.example.net, ns2.example.net · DNSSEC signed, validated
 Propagation  consistent: 2 nameserver addresses, 2 resolvers agree on A, AAAA, MX, TXT
+Email        skipped: not requested
 ";
     assert_eq!(out, want);
 
@@ -492,6 +493,7 @@ Propagation  consistent: 2 nameserver addresses, 2 resolvers agree on A, AAAA, M
 
 DNS          A 192.0.2.10 · AAAA 2001:db8::10 · MX 20 mx2.example.net, 10 mx1.example.net · NS ns1.example.net, ns2.example.net · DNSSEC signed, validated
 Propagation  skipped: not requested
+Email        skipped: not requested
 
 ✗ printer.test  printer.test is a special-use name (RFC 6761); it never resolves on the public internet.
                 Use domain-check lookup to ask your own resolver about it.
@@ -502,6 +504,7 @@ nope.example.com  1 error · checked T
 
 DNS          doesn't exist (NXDOMAIN)
 Propagation  skipped: not requested
+Email        skipped: not requested
 
 3 domains: 2 with errors, 1 clean
 ";
@@ -522,6 +525,7 @@ i dns          No CAA record: any certificate authority may issue certificates f
 
 DNS          A 192.0.2.30 · NS ns1.example.net, ns2.example.net · DNSSEC unsigned
 Propagation  consistent: 1 nameserver addresses, 2 resolvers agree on A · 1 nameserver address didn't answer
+Email        skipped: not requested
 ";
     assert_eq!(out, want);
 
@@ -534,6 +538,7 @@ Propagation  consistent: 1 nameserver addresses, 2 resolvers agree on A · 1 nam
 
 DNS          unavailable: Couldn't reach the DNS resolver {}: timeout.
 Propagation  unavailable: No DNS answer, so this check couldn't run.
+Email        skipped: not requested
 ",
         silent.addr()
     );

@@ -250,6 +250,76 @@ pub const MAIL: &[(&str, RecordType, &str)] = {
         ("nullmx.example.net", MX, "0 ."),
         ("implicit.example.net", A, "192.0.2.27"),
         ("nomail.example.net", TXT, "no mail here"),
+        // SPF
+        ("spf.example.net", A, "192.0.2.30"),
+        ("spf.example.net", MX, "10 mx1.example.net"),
+        (
+            "spf.example.net",
+            TXT,
+            "v=spf1 include:_spf.example.net a mx ip4:192.0.2.0/24 ptr exists:%{i}.exists.example.net -all",
+        ),
+        (
+            "_spf.example.net",
+            TXT,
+            "v=spf1 include:_inner.example.net ip6:2001:db8::/32 ~all",
+        ),
+        ("_inner.example.net", TXT, "v=spf1 ip4:198.51.100.0/24 -all"),
+        (
+            "many.example.net",
+            TXT,
+            "v=spf1 include:_n1.example.net include:_n2.example.net include:_n3.example.net include:_n4.example.net include:_n5.example.net include:_n6.example.net -all",
+        ),
+        ("_n1.example.net", TXT, "v=spf1 mx:mx.example.net ~all"),
+        ("_n2.example.net", TXT, "v=spf1 mx:mx.example.net ~all"),
+        ("_n3.example.net", TXT, "v=spf1 mx:mx.example.net ~all"),
+        ("_n4.example.net", TXT, "v=spf1 mx:mx.example.net ~all"),
+        ("_n5.example.net", TXT, "v=spf1 mx:mx.example.net ~all"),
+        ("_n6.example.net", TXT, "v=spf1 mx:mx.example.net ~all"),
+        (
+            "capped.example.net",
+            TXT,
+            "v=spf1 include:many.example.net include:many.example.net -all",
+        ),
+        (
+            "void.example.net",
+            TXT,
+            "v=spf1 a:gone.example.net mx:noaddr.example.net exists:gone.example.org include:nomail.example.net include:gone.example.net ~all",
+        ),
+        (
+            "loop.example.net",
+            TXT,
+            "v=spf1 include:_loop.example.net -all",
+        ),
+        (
+            "_loop.example.net",
+            TXT,
+            "v=spf1 include:LOOP.example.net. ~all",
+        ),
+        (
+            "redirect.example.net",
+            TXT,
+            "v=spf1 redirect=_spf.example.net",
+        ),
+        (
+            "redirected.example.net",
+            TXT,
+            "v=spf1 ip4:192.0.2.1 redirect=_spf.example.net ?all",
+        ),
+        ("plusall.example.net", TXT, "v=spf1 all"),
+        ("noall.example.net", TXT, "v=spf1 ip4:192.0.2.1"),
+        ("multi.example.net", TXT, "v=spf1 -all"),
+        ("multi.example.net", TXT, "v=spf1 ~all"),
+        ("multi.example.net", TXT, "spf2.0/mfrom,pra -all"),
+        (
+            "syntax.example.net",
+            TXT,
+            "v=spf1 inlcude:_spf.example.net ip4:192.0.2.300 -all",
+        ),
+        (
+            "failing.example.net",
+            TXT,
+            "v=spf1 include:servfail.example.net a:servfail.example.org -all",
+        ),
     ]
 };
 
@@ -367,6 +437,21 @@ pub fn records(owner: &str, t: RecordType, at: Option<IpAddr>) -> Option<Vec<Rec
         ("0.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa", T::PTR) => {
             rec(3600, RData::PTR(PTR(name("www.example.com"))))
         }
+        ("mxmany.example.net", T::TXT) => {
+            rec(300, RData::TXT(TXT::new(vec!["v=spf1 mx -all".into()])))
+        }
+        ("mxmany.example.net", T::MX) => (1..=11)
+            .map(|p| record(owner, 300, RData::MX(MX::new(p, name("mx1.example.net")))))
+            .collect(),
+        ("long.example.net", T::TXT) => {
+            let ranges: String = (0..32).map(|i| format!("ip4:198.51.100.{i} ")).collect();
+            let spf = format!("v=spf1 {ranges}-all");
+            let chunks = spf
+                .as_bytes()
+                .chunks(255)
+                .map(|c| String::from_utf8(c.to_vec()).unwrap());
+            rec(300, RData::TXT(TXT::new(chunks.collect())))
+        }
         ("big.example.com", T::TXT) => (0..40)
             .map(|i| {
                 record(
@@ -407,6 +492,8 @@ pub fn records(owner: &str, t: RecordType, at: Option<IpAddr>) -> Option<Vec<Rec
             | "_443._tcp.example.com"
             | "_dns.example.com"
             | "big.example.com"
+            | "mxmany.example.net"
+            | "long.example.net"
             | "10.2.0.192.in-addr.arpa",
             _,
         ) => Vec::new(),
