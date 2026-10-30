@@ -16,6 +16,7 @@ strip = true
 
 [dependencies]
 base64 = "0.23.1"
+clap = { version = "4.6.7", features = ["derive"] }
 hickory-net = { version = "0.26.3", default-features = false, features = ["tokio"] }
 hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
 hickory-resolver = { version = "0.26.3", default-features = false, features = ["system-config", "tokio"] }

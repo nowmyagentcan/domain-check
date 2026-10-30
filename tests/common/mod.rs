@@ -5,6 +5,7 @@
 
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -168,7 +169,10 @@ fn answer(
 }
 
 pub fn name(s: &str) -> Name {
-    Name::from_str(&format!("{s}.")).unwrap()
+    match s {
+        "." => Name::root(),
+        _ => Name::from_str(&format!("{s}.")).unwrap(),
+    }
 }
 
 pub fn record(owner: &str, ttl: u32, data: RData) -> Record {
@@ -225,9 +229,14 @@ pub fn records(owner: &str, t: RecordType) -> Option<Vec<Record>> {
                 "-all".into(),
             ])),
         ),
+        // CAA issuer values are text: no trailing dot.
         ("example.com", T::CAA) => rec(
             3600,
-            RData::CAA(CAA::new_issue(false, Some(name("letsencrypt.org")), vec![])),
+            RData::CAA(CAA::new_issue(
+                false,
+                Some(Name::from_str("letsencrypt.org").unwrap()),
+                vec![],
+            )),
         ),
         ("example.com", T::SOA) => vec![soa("example.com")],
         ("example.com", T::HTTPS) => rec(300, RData::HTTPS(HTTPS(svcb(1, ".")))),
@@ -330,4 +339,36 @@ pub fn closed_udp_port() -> SocketAddr {
         .unwrap()
         .local_addr()
         .unwrap()
+}
+
+/// The binary with no test hook or proxy setting inherited from this machine.
+pub fn command(args: &[&str], env: &[(&str, &str)]) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_domain-check"));
+    cmd.args(args).stdin(Stdio::null());
+    for (name, _) in std::env::vars() {
+        let upper = name.to_ascii_uppercase();
+        if upper.starts_with("DOMAIN_CHECK_") || upper.ends_with("_PROXY") {
+            cmd.env_remove(name);
+        }
+    }
+    cmd.env("NO_COLOR", "1").envs(env.iter().copied());
+    cmd
+}
+
+/// Runs the binary; exit code, stdout, stderr.
+pub fn run(args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
+    let out = command(args, env).output().unwrap();
+    let text = |b: Vec<u8>| String::from_utf8(b).unwrap();
+    (
+        out.status.code().unwrap(),
+        text(out.stdout),
+        text(out.stderr),
+    )
+}
+
+/// The `--json` answer of a run that writes nothing on stderr.
+pub fn json(args: &[&str], env: &[(&str, &str)]) -> (i32, serde_json::Value) {
+    let (code, out, err) = run(&[args, &["--json"]].concat(), env);
+    assert_eq!(err, "", "{args:?}");
+    (code, serde_json::from_str(&out).unwrap())
 }

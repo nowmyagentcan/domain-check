@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 
 pub mod dns;
 pub mod input;
+pub mod lookup;
 pub mod report;
 
 /// The `publication` stamp of the bundled IANA RDAP bootstrap file, `data/rdap-dns.json`.
