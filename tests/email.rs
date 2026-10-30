@@ -1528,7 +1528,6 @@ fn a_repeated_dmarc_tag_is_invalid() {
 }
 
 #[test]
-#[ignore = "known bug: DC07"]
 fn a_record_with_rua_and_no_p_is_read_as_p_none() {
     let stub = DnsStub::new();
     let (code, r) = email(&stub, "ruaonly.example.net", &[]);

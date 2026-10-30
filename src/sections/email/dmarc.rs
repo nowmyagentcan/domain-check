@@ -181,11 +181,11 @@ async fn read(mail: &Arc<Mail>, name: &str, record: &str, found: &mut Vec<Findin
         *field = checked;
     }
     if tags.p.is_none() {
-        // A record with report addresses but no usable policy reads as p=none (RFC 9989 §4.7).
+        // A record with report addresses but no usable policy reads as p=none (RFC 9989
+        // §4.10.1); p itself is only RECOMMENDED (§4.7).
         if !tags.rua.is_empty() {
             tags.p = Some("none".into());
-        }
-        if !pairs(record).iter().any(|(t, _)| t == "p") {
+        } else if !pairs(record).iter().any(|(t, _)| t == "p") {
             found.push(syntax(name, "p= is missing"));
         }
     }
