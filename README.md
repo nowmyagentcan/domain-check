@@ -70,7 +70,7 @@ domain-check example.com example.org --json
 
 Checks: `dns`, `propagation`, `email`, `rdap` (registration), `tls` (certificate), `http` (redirects and headers).
 Exit codes: 0 clean, 1 error findings or bad input, 2 usage error, 3 a check couldn't reach the network.
-`domain-check` alone in a terminal asks for domains one at a time; `domain-check --help` lists every option.
+`domain-check` alone in a terminal asks for domains one at a time; `domain-check check --help` lists every option.
 
 `domain-check ui` opens the same report as a page in your browser, served on 127.0.0.1 only.
 

@@ -65,13 +65,11 @@ fn never_points_at_the_unrelated_crate() {
 }
 
 #[test]
-#[ignore = "known bug: DC16"]
 fn the_help_the_readme_points_to_lists_the_options() {
-    let (code, out, _) = common::run(&["--help"], &[]);
+    assert!(README.contains("`domain-check check --help` lists every option"));
+    let (code, out, _) = common::run(&["check", "--help"], &[]);
     assert_eq!(code, 0);
-    if README.contains("`domain-check --help` lists every option") {
-        for flag in ["--checks", "--json", "--dns", "--allow-private"] {
-            assert!(out.contains(flag), "{flag} isn't in --help:\n{out}");
-        }
+    for flag in ["--checks", "--json", "--dns", "--allow-private"] {
+        assert!(out.contains(flag), "{flag} isn't in check --help:\n{out}");
     }
 }
