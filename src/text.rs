@@ -10,6 +10,7 @@ use crate::sections::dns::Dns;
 use crate::sections::email::Email;
 use crate::sections::email::policy::Policy;
 use crate::sections::propagation::Propagation;
+use crate::sections::rdap::Rdap;
 use crate::sections::tls::Tls;
 use crate::sections::web::{Chain, Web};
 
@@ -132,6 +133,9 @@ pub fn report(r: &Report) -> String {
             .as_ref()
             .map(|x| (Check::Propagation, line(x, propagation))),
         s.email.as_ref().map(|x| (Check::Email, line(x, email))),
+        s.rdap
+            .as_ref()
+            .map(|x| (Check::Rdap, line(&x.section, rdap))),
         s.tls.as_ref().map(|x| (Check::Tls, line(x, tls))),
         s.http.as_ref().map(|x| (Check::Http, line(x, web))),
     ];
@@ -339,6 +343,36 @@ fn email(e: &Email) -> String {
         }
     }
     parts.join(" · ")
+}
+
+/// `Example Registrar (9999) · created 2016-10-31 · expires 2027-08-27 · client transfer
+/// prohibited`
+fn rdap(r: &Rdap) -> String {
+    let tld = r.queried.as_deref().and_then(|q| q.rsplit('.').next());
+    match (&r.server, r.found) {
+        (None, _) => return format!("no RDAP service for .{}", tld.unwrap_or_default()),
+        (Some(_), false) => return "no registration record".into(),
+        _ => {}
+    }
+    let mut parts = Vec::new();
+    if let Some(name) = r.registrar.as_ref().and_then(|g| g.name.as_ref()) {
+        match r.registrar.as_ref().and_then(|g| g.iana_id.as_ref()) {
+            Some(id) => parts.push(format!("{name} ({id})")),
+            None => parts.push(name.clone()),
+        }
+    }
+    for (word, at) in [("created", &r.created), ("expires", &r.expires)] {
+        if let Some(at) = at {
+            parts.push(format!("{word} {}", &at[..10]));
+        }
+    }
+    if !r.domain_status.is_empty() {
+        parts.push(r.domain_status.join(", "));
+    }
+    match parts.is_empty() {
+        true => "registered".into(),
+        false => parts.join(" · "),
+    }
 }
 
 /// The common name in a distinguished name like `C=US, O=Example, CN=R3`.

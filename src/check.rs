@@ -19,15 +19,17 @@ use crate::report::{Check, Finding, Output, Report, Section, Sections, Severity,
 use crate::sections::dns::Dns;
 use crate::sections::email::Email;
 use crate::sections::propagation::Propagation;
+use crate::sections::rdap::{self, RdapSection};
 use crate::sections::tls::Tls;
 use crate::sections::web::Web;
 use crate::{Error, Ports, sections};
 
 /// The checks this version runs, in report order.
-pub const CHECKS: [Check; 5] = [
+pub const CHECKS: [Check; 6] = [
     Check::Dns,
     Check::Propagation,
     Check::Email,
+    Check::Rdap,
     Check::Tls,
     Check::Http,
 ];
@@ -47,6 +49,8 @@ pub struct Options {
     pub ca: Vec<CertificateDer<'static>>,
     pub allow_private: bool,
     pub ports: Ports,
+    /// `DOMAIN_CHECK_RDAP_BOOTSTRAP`: the bootstrap file to use instead of the bundled one.
+    pub bootstrap: Option<String>,
     pub debug: bool,
 }
 
@@ -96,6 +100,7 @@ pub struct Cx {
     pub types: Vec<RecordType>,
     pub selectors: Vec<String>,
     pub spf_ip: Option<IpAddr>,
+    pub rdap: Arc<rdap::Run>,
     /// When the domain's check began: every section's budget counts from here.
     pub started: Instant,
 }
@@ -235,6 +240,7 @@ pub fn run(inputs: &[String], options: &Options, progress: &mut Progress) -> Res
         ));
     }
     let mut net = None;
+    let rdap = Arc::new(rdap::Run::new(options.bootstrap.clone()));
     let mut done: HashMap<String, Checked> = HashMap::new();
     let mut reports = Vec::with_capacity(inputs.len());
     for input in inputs {
@@ -248,7 +254,8 @@ pub fn run(inputs: &[String], options: &Options, progress: &mut Progress) -> Res
         let c = match done.get(&d.ascii) {
             Some(c) => c.clone(),
             None => {
-                let c = checked(&d, shared(&mut net, options)?, options, progress);
+                let net = shared(&mut net, options)?;
+                let c = checked(&d, net, Arc::clone(&rdap), options, progress);
                 done.insert(d.ascii.clone(), c.clone());
                 c
             }
@@ -320,6 +327,7 @@ enum Part {
     Dns(Section<Dns>),
     Propagation(Section<Propagation>),
     Email(Box<Section<Email>>),
+    Rdap(Box<RdapSection>),
     Tls(Box<Section<Tls>>),
     Http(Box<Section<Web>>),
     Down(Status, String),
@@ -342,7 +350,13 @@ impl Outcome {
 }
 
 /// The facts first, then every requested section on its own thread, each within its budget.
-fn checked(d: &Domain, net: Arc<Net>, o: &Options, progress: &mut Progress) -> Checked {
+fn checked(
+    d: &Domain,
+    net: Arc<Net>,
+    rdap: Arc<rdap::Run>,
+    o: &Options,
+    progress: &mut Progress,
+) -> Checked {
     let start = Instant::now();
     let checked_at = now();
     let cx = Arc::new(Cx {
@@ -353,6 +367,7 @@ fn checked(d: &Domain, net: Arc<Net>, o: &Options, progress: &mut Progress) -> C
         types: o.types.clone(),
         selectors: o.selectors.clone(),
         spf_ip: o.spf_ip,
+        rdap,
         started: start,
     });
     let (tx, rx) = mpsc::channel();
@@ -371,6 +386,7 @@ fn checked(d: &Domain, net: Arc<Net>, o: &Options, progress: &mut Progress) -> C
             Part::Dns(s) => sections.dns = Some(s),
             Part::Propagation(s) => sections.propagation = Some(s),
             Part::Email(s) => sections.email = Some(*s),
+            Part::Rdap(s) => sections.rdap = Some(*s),
             Part::Tls(s) => sections.tls = Some(*s),
             Part::Http(s) => sections.http = Some(*s),
             Part::Down(status, why) => sections.not(outcome.check, status, &why),
@@ -425,14 +441,14 @@ fn section(check: Check, cx: &Cx, facts: &Facts) -> Outcome {
             let (s, f) = sections::tls::run(cx, facts);
             (Part::Tls(Box::new(s)), f)
         }
+        Check::Rdap => {
+            let (s, f) = rdap::run(cx, facts);
+            (Part::Rdap(Box::new(s)), f)
+        }
         Check::Http => {
             let (s, f) = sections::web::run(cx, facts);
             (Part::Http(Box::new(s)), f)
         }
-        _ => (
-            Part::Down(Status::Skipped, "not requested".into()),
-            Vec::new(),
-        ),
     };
     Outcome {
         check,
@@ -471,6 +487,7 @@ fn collect(
                     Part::Dns(s) => s.status,
                     Part::Propagation(s) => s.status,
                     Part::Email(s) => s.status,
+                    Part::Rdap(s) => s.section.status,
                     Part::Tls(s) => s.status,
                     Part::Http(s) => s.status,
                     Part::Down(status, _) => *status,
@@ -529,7 +546,7 @@ mod tests {
         );
         assert_eq!(
             e.hint.unwrap(),
-            "Use dns, propagation, email, tls, http or all."
+            "Use dns, propagation, email, rdap, tls, http or all."
         );
     }
 

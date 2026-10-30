@@ -441,7 +441,8 @@ fn slow_answers_keep_each_section_inside_its_budget() {
         common::fixtures(a)
     });
     let started = std::time::Instant::now();
-    let (code, v) = check(&slow, &["example.com"]);
+    let all_but_rdap = "dns,propagation,email,tls,http";
+    let (code, v) = check(&slow, &["example.com", "-c", all_but_rdap]);
     let took = started.elapsed().as_secs_f64();
     assert!(took < 15.0, "{took} s");
     assert_eq!(code, 0, "{v}");
@@ -471,7 +472,10 @@ fn a_silent_resolver_makes_every_section_unavailable_quickly() {
     for s in ["propagation", "email", "tls", "http"] {
         assert_eq!(r[s]["reason"], reason, "{s}");
     }
-    assert_eq!(v["summary"]["unavailable"], 5);
+    // The tests' default bootstrap is on 127.0.0.1, refused without --allow-private.
+    let refused = "Couldn't reach 127.0.0.1: 127.0.0.1 is a private address.";
+    assert_eq!(r["rdap"]["reason"], refused);
+    assert_eq!(v["summary"]["unavailable"], 6);
 }
 
 /// The text report, with each `checked HH:MM UTC` turned into `checked T`.
@@ -503,6 +507,7 @@ fn the_text_report_puts_findings_first_then_one_line_per_section() {
 DNS          A 192.0.2.10 · AAAA 2001:db8::10 · MX 20 mx2.example.net, 10 mx1.example.net · NS ns1.example.net, ns2.example.net · DNSSEC signed, validated
 Propagation  consistent: 2 nameserver addresses, 2 resolvers agree on A, AAAA, MX, TXT
 Email        skipped: not requested
+Registration skipped: not requested
 Certificate  skipped: not requested
 Web          skipped: not requested
 ";
@@ -525,6 +530,7 @@ Web          skipped: not requested
 DNS          A 192.0.2.10 · AAAA 2001:db8::10 · MX 20 mx2.example.net, 10 mx1.example.net · NS ns1.example.net, ns2.example.net · DNSSEC signed, validated
 Propagation  skipped: not requested
 Email        skipped: not requested
+Registration skipped: not requested
 Certificate  skipped: not requested
 Web          skipped: not requested
 
@@ -538,6 +544,7 @@ nope.example.com  1 error · checked T
 DNS          doesn't exist (NXDOMAIN)
 Propagation  skipped: not requested
 Email        skipped: not requested
+Registration skipped: not requested
 Certificate  skipped: not requested
 Web          skipped: not requested
 
@@ -561,6 +568,7 @@ i dns          No CAA record: any certificate authority may issue certificates f
 DNS          A 192.0.2.30 · NS ns1.example.net, ns2.example.net · DNSSEC unsigned
 Propagation  consistent: 1 nameserver addresses, 2 resolvers agree on A · 1 nameserver address didn't answer
 Email        skipped: not requested
+Registration skipped: not requested
 Certificate  skipped: not requested
 Web          skipped: not requested
 ";
@@ -576,6 +584,7 @@ Web          skipped: not requested
 DNS          unavailable: Couldn't reach the DNS resolver {}: timeout.
 Propagation  unavailable: No DNS answer, so this check couldn't run.
 Email        skipped: not requested
+Registration skipped: not requested
 Certificate  skipped: not requested
 Web          skipped: not requested
 ",

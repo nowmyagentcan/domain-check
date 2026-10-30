@@ -210,7 +210,7 @@ pub fn record(owner: &str, ttl: u32, data: RData) -> Record {
 
 /// The zones the stub serves; a name belongs to the longest one it ends in. The ones under
 /// example.org each show one way a zone's nameservers can go wrong.
-pub const ZONES: [&str; 14] = [
+pub const ZONES: [&str; 15] = [
     "example.com",
     "example.net",
     "example.org",
@@ -223,6 +223,7 @@ pub const ZONES: [&str; 14] = [
     "lamerefused.example.org",
     "slow.example.org",
     "single.example.org",
+    "a.b.example.net",
     "in-addr.arpa",
     "ip6.arpa",
 ];
@@ -398,6 +399,9 @@ pub const MAIL: &[(&str, RecordType, &str)] = {
         ("garbage.example.com", A, "127.0.0.1"),
         ("headers.example.com", A, "127.0.0.1"),
         ("bare.example.com", A, "127.0.0.1"),
+        // RDAP: tests/common/web.rs rdap() serves the registry and the registrar
+        ("rdap.example.net", A, "127.0.0.1"),
+        ("registrar.example.net", A, "127.0.0.1"),
     ]
 };
 
@@ -725,7 +729,8 @@ pub fn closed_udp_port() -> SocketAddr {
         .unwrap()
 }
 
-/// The binary with no test hook or proxy setting inherited from this machine.
+/// The binary with no test hook or proxy setting inherited from this machine. RDAP bootstraps
+/// from 127.0.0.1 unless the test says otherwise, so no run can reach a real registry.
 pub fn command(args: &[&str], env: &[(&str, &str)]) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_domain-check"));
     cmd.args(args).stdin(Stdio::null());
@@ -735,7 +740,9 @@ pub fn command(args: &[&str], env: &[(&str, &str)]) -> Command {
             cmd.env_remove(name);
         }
     }
-    cmd.env("NO_COLOR", "1").envs(env.iter().copied());
+    cmd.env("NO_COLOR", "1")
+        .env("DOMAIN_CHECK_RDAP_BOOTSTRAP", "http://127.0.0.1/dns.json")
+        .envs(env.iter().copied());
     cmd
 }
 

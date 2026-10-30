@@ -10,6 +10,7 @@ pub mod sections {
     pub mod dns;
     pub mod email;
     pub mod propagation;
+    pub mod rdap;
     pub mod tls;
     pub mod web;
 }

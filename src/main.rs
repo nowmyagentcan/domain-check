@@ -6,6 +6,7 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use domain_check::check::{self, Options};
 use domain_check::dns::{self, Resolver};
 use domain_check::sections::email::dkim;
+use domain_check::sections::rdap;
 use domain_check::{Error, Ports, input, lookup, net, text};
 
 // clap prints the name itself.
@@ -19,17 +20,19 @@ const USAGE: &str = "domain-check [check] <DOMAIN>... [OPTIONS]
        domain-check <COMMAND>";
 
 const AFTER_HELP: &str =
-    "Checks: dns, propagation, email, tls (certificate), http (redirects and headers).
+    "Checks: dns, propagation, email, rdap (registration), tls (certificate), http (redirects and headers).
 Only ports 53, 80 and 443 are contacted; nothing is stored.
 
 \x1b[1;4mEnvironment:\x1b[0m
   NO_COLOR                       no colour
+  DOMAIN_CHECK_RDAP_BOOTSTRAP    URL of an RDAP bootstrap file to use instead of the bundled one
   DOMAIN_CHECK_LOOPBACK_PORTS    dns=N,http=N,https=N for loopback destinations (tests, mirrors)
 
 \x1b[1;4mExamples:\x1b[0m
   domain-check example.com
   domain-check example.com --checks email -s google
   domain-check example.com --checks email --spf-ip 192.0.2.10
+  domain-check example.com --checks tls,http
   domain-check example.com --checks propagation --types A,MX
   domain-check lookup _dmarc.example.com TXT
   domain-check lookup 8.8.8.8
@@ -68,7 +71,7 @@ struct CheckArgs {
     /// a domain, URL or email address
     #[arg(value_name = "DOMAIN")]
     domains: Vec<String>,
-    /// sections to run: dns, propagation, email, tls, http or all
+    /// sections to run: dns, propagation, email, rdap, tls, http or all
     #[arg(
         short,
         long,
@@ -226,6 +229,7 @@ fn run_check(args: CheckArgs) -> Result<Done, Error> {
             .unwrap_or_default(),
         allow_private: args.allow_private,
         ports: Ports::from_env()?,
+        bootstrap: rdap::from_env()?,
         debug: args.debug,
     };
     let mut line = Line {

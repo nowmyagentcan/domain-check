@@ -8,6 +8,7 @@ use crate::input::Domain;
 use crate::sections::dns::Dns;
 use crate::sections::email::Email;
 use crate::sections::propagation::Propagation;
+use crate::sections::rdap::RdapSection;
 use crate::sections::tls::Tls;
 use crate::sections::web::Web;
 use crate::{Error, RDAP_BOOTSTRAP};
@@ -191,6 +192,7 @@ pub struct Sections {
     pub dns: Option<Section<Dns>>,
     pub propagation: Option<Section<Propagation>>,
     pub email: Option<Section<Email>>,
+    pub rdap: Option<RdapSection>,
     pub tls: Option<Section<Tls>>,
     pub http: Option<Section<Web>>,
 }
@@ -203,8 +205,8 @@ impl Sections {
             Check::Propagation => self.propagation = Some(Section::not(status, reason)),
             Check::Email => self.email = Some(Section::not(status, reason)),
             Check::Tls => self.tls = Some(Section::not(status, reason)),
+            Check::Rdap => self.rdap = Some(RdapSection::not(status, reason)),
             Check::Http => self.http = Some(Section::not(status, reason)),
-            Check::Rdap => {}
         }
     }
 
@@ -214,6 +216,7 @@ impl Sections {
             self.dns.as_ref().map(|s| s.status),
             self.propagation.as_ref().map(|s| s.status),
             self.email.as_ref().map(|s| s.status),
+            self.rdap.as_ref().map(|s| s.section.status),
             self.tls.as_ref().map(|s| s.status),
             self.http.as_ref().map(|s| s.status),
         ];
@@ -460,6 +463,7 @@ mod tests {
                         "dns": null,
                         "propagation": null,
                         "email": null,
+                        "rdap": null,
                         "tls": null,
                         "http": null
                     },
@@ -477,6 +481,7 @@ mod tests {
                         "dns": null,
                         "propagation": null,
                         "email": null,
+                        "rdap": null,
                         "tls": null,
                         "http": null
                     }

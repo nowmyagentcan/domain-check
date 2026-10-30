@@ -8,6 +8,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
+use std::time::Instant;
 
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
@@ -16,6 +17,8 @@ use rcgen::{
 use rustls::StreamOwned;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::{Acceptor, ServerConfig};
+use serde_json::{Value, json};
+use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
 use super::DnsStub;
@@ -85,11 +88,145 @@ fn sts_policy(host: &str) -> Reply {
     }
 }
 
-/// The answer to `path` on `host`: the first label of the host picks the site. Status 0 sends
-/// bytes that aren't HTTP.
-pub fn route(host: &str, path: &str, https: bool) -> Reply {
+/// An RFC 3339 time `n` days from now.
+pub fn days(n: i64) -> String {
+    (OffsetDateTime::now_utc() + Duration::days(n))
+        .format(&Rfc3339)
+        .unwrap()
+}
+
+fn rdap_json(status: u16, value: Value) -> Reply {
+    let kind = [("Content-Type", "application/rdap+json")];
+    Reply::new(status, &kind, &value.to_string())
+}
+
+/// A bootstrap file naming each TLD's service URLs.
+fn bootstrap(services: Value) -> Reply {
+    let file = json!({ "version": "1.0", "publication": "2026-10-30T12:00:00Z",
+        "description": "test bootstrap", "services": services });
+    Reply::new(
+        200,
+        &[("Content-Type", "application/json")],
+        &file.to_string(),
+    )
+}
+
+/// A registry's domain object: expiry `expires` days from now, the statuses and nameservers,
+/// and the registrar link when `related`.
+fn domain(name: &str, expires: Option<i64>, status: &[&str], ns: &[&str], related: bool) -> Value {
+    let mut events = vec![
+        json!({ "eventAction": "registration", "eventDate": days(-3650) }),
+        json!({ "eventAction": "last changed", "eventDate": days(-30) }),
+    ];
+    if let Some(n) = expires {
+        events.push(json!({ "eventAction": "expiration", "eventDate": days(n) }));
+    }
+    let mut links = vec![
+        json!({ "rel": "self", "href": format!("https://rdap.example.net/rdap/domain/{name}") }),
+    ];
+    if related {
+        links.push(json!({ "rel": "related", "type": "application/rdap+json",
+            "href": format!("https://registrar.example.net/domain/{name}") }));
+    }
+    let servers: Vec<Value> = ns.iter().map(|n| json!({ "ldhName": n })).collect();
+    json!({
+        "objectClassName": "domain", "ldhName": name.to_uppercase(),
+        "events": events, "status": status, "nameservers": servers, "links": links,
+        "secureDNS": { "delegationSigned": false },
+        "entities": [{ "objectClassName": "entity", "roles": ["registrar"],
+            "publicIds": [{ "type": "IANA Registrar ID", "identifier": "9999" }],
+            "vcardArray": ["vcard", [["version", {}, "text", "4.0"], ["fn", {}, "text", "Example Registrar, Inc."]]] }],
+        "notices": [{ "title": "Terms of Use", "links": [{ "rel": "terms-of-service", "href": "https://rdap.example.net/terms" }] }]
+    })
+}
+
+/// The registry's answer for `name`, asked `nth` times before.
+fn registry(name: &str, nth: usize) -> Reply {
+    let lock = [
+        "client delete prohibited",
+        "client transfer prohibited",
+        "client update prohibited",
+    ];
+    let ns = ["NS1.EXAMPLE.NET.", "ns2.example.net"];
+    let record = |expires, status: &[&str], related| {
+        rdap_json(200, domain(name, expires, status, &ns, related))
+    };
+    match name {
+        "example.com" => record(Some(300), &lock, true),
+        "example.org" | "single.example.org" => record(Some(300), &lock[1..2], false),
+        "wild.example.org" => Reply::new(404, &[], ""),
+        "limited.example.com" => Reply::new(429, &[("Retry-After", "42")], ""),
+        "busy.example.com" => Reply::new(503, &[], ""),
+        "flaky.example.com" if nth == 0 => Reply::new(502, &[], ""),
+        "flaky.example.com" => record(Some(300), &lock, false),
+        "html.example.com" => Reply::new(200, &[("Content-Type", "text/html")], "<html>hi</html>"),
+        "bad.example.com" => Reply::new(400, &[], ""),
+        "moved.example.com" => Reply::new(301, &[("Location", "/rdap/domain/example.com")], ""),
+        "away.example.com" => Reply::new(302, &[("Location", "http://rdap.example.org/x")], ""),
+        "lapsed.example.com" => record(Some(-5), &[], false),
+        "soon.example.com" => record(Some(10), &lock[1..2], false),
+        "held.example.com" => record(
+            Some(300),
+            &["client hold", "client transfer prohibited"],
+            false,
+        ),
+        "deleting.example.com" => record(Some(300), &["pending delete"], false),
+        "noexpiry.example.com" => record(None, &lock, true),
+        "nolock.uk" => record(Some(300), &[], false),
+        _ => rdap_json(404, json!({ "errorCode": 404, "title": "Not Found" })),
+    }
+}
+
+/// The registrar's answer for `name`.
+fn registrar(name: &str) -> Reply {
+    let dates = |expires| {
+        let events = json!([{ "eventAction": "expiration", "eventDate": days(expires) },
+            { "eventAction": "last changed", "eventDate": days(-1) }]);
+        rdap_json(
+            200,
+            json!({ "objectClassName": "domain", "ldhName": name, "events": events }),
+        )
+    };
+    match name {
+        "example.com" => dates(400),
+        "noexpiry.example.com" => dates(200),
+        _ => rdap_json(404, json!({ "errorCode": 404 })),
+    }
+}
+
+/// RDAP: bootstrap files over plain http on any host, the registry `rdap.example.net` and the
+/// registrar `registrar.example.net` over https. `/fallback/dns.json` first names a server that
+/// hangs up, then the real one.
+fn rdap(site: &str, path: &str, https: bool, nth: usize) -> Option<Reply> {
+    let services = json!([
+        [["com"], ["https://rdap.example.net/rdap"]],
+        [
+            ["org", "uk"],
+            ["http://rdap.example.org/", "https://rdap.example.net/rdap/"]
+        ],
+        [["net"], ["https://rdap.example.net/"]],
+    ]);
+    let name = path.rsplit('/').next().unwrap_or_default();
+    Some(match (site, https, path) {
+        (_, false, "/dns.json") => bootstrap(services),
+        (_, false, "/fallback/dns.json") if nth == 0 => {
+            bootstrap(json!([[["com"], ["https://hangup.example.com/"]]]))
+        }
+        (_, false, "/fallback/dns.json") => bootstrap(services),
+        ("rdap", true, _) => registry(name, nth),
+        ("registrar", true, _) => registrar(name),
+        _ => return None,
+    })
+}
+
+/// The answer to `path` on `host`, asked `nth` times before: the first label of the host picks
+/// the site. Status 0 sends bytes that aren't HTTP.
+pub fn route(host: &str, path: &str, https: bool, nth: usize) -> Reply {
     let to = |status, location: &str| Reply::new(status, &[("Location", location)], "");
     let site = host.split('.').next().unwrap_or_default();
+    if let Some(reply) = rdap(site, path, https, nth) {
+        return reply;
+    }
     match (site, https, path) {
         ("web", false, _) => Reply::new(
             301,
@@ -163,7 +300,7 @@ pub struct Web {
     /// The PEM file of the test root, for `--ca-file`.
     pub ca: String,
     connections: Arc<Mutex<usize>>,
-    hits: Arc<Mutex<Vec<Hit>>>,
+    hits: Arc<Mutex<Vec<(Hit, Instant)>>>,
 }
 
 impl Web {
@@ -207,11 +344,16 @@ impl Web {
     }
 
     pub fn hits(&self) -> Vec<Hit> {
+        self.timed().into_iter().map(|(hit, _)| hit).collect()
+    }
+
+    /// Each request and when it arrived.
+    pub fn timed(&self) -> Vec<(Hit, Instant)> {
         self.hits.lock().unwrap().clone()
     }
 }
 
-fn serve_tls(mut stream: TcpStream, hits: &Mutex<Vec<Hit>>) {
+fn serve_tls(mut stream: TcpStream, hits: &Mutex<Vec<(Hit, Instant)>>) {
     let mut acceptor = Acceptor::default();
     let accepted = loop {
         match acceptor.read_tls(&mut stream) {
@@ -243,7 +385,7 @@ fn serve_tls(mut stream: TcpStream, hits: &Mutex<Vec<Hit>>) {
 }
 
 /// Reads one request head and answers it; the connection closes after.
-fn serve(stream: &mut (impl Read + Write), https: bool, hits: &Mutex<Vec<Hit>>) {
+fn serve(stream: &mut (impl Read + Write), https: bool, hits: &Mutex<Vec<(Hit, Instant)>>) {
     let mut head = Vec::new();
     let mut byte = [0];
     while !head.ends_with(b"\r\n\r\n") {
@@ -265,12 +407,18 @@ fn serve(stream: &mut (impl Read + Write), https: bool, hits: &Mutex<Vec<Hit>>) 
         })
         .unwrap_or_default();
     let host = host.rsplit_once(':').map_or(host, |(h, _)| h).to_string();
-    hits.lock().unwrap().push(Hit {
+    let hit = Hit {
         https,
         host: host.clone(),
         path: path.to_string(),
-    });
-    let reply = route(&host, path, https);
+    };
+    let nth = {
+        let mut hits = hits.lock().unwrap();
+        let nth = hits.iter().filter(|(h, _)| *h == hit).count();
+        hits.push((hit, Instant::now()));
+        nth
+    };
+    let reply = route(&host, path, https, nth);
     if reply.status == 0 {
         let _ = stream.write_all(b"this is not http\r\n\r\n");
         return;

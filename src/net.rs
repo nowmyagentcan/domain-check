@@ -106,6 +106,9 @@ pub enum Failed {
 impl fmt::Display for Failed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Failed::Private { host, address } if *host == address.to_string() => {
+                write!(f, "{address} is a private address")
+            }
             Failed::Private { host, address } => {
                 write!(f, "{host} resolves to {address}, a private address")
             }
@@ -240,9 +243,21 @@ impl Net {
 
     /// One GET of `url`, never following a redirect, given up at `until` at the latest.
     pub fn get(&self, url: &str, until: Instant) -> Result<Response<Body>, Failed> {
+        self.get_as(url, until, "*/*", REQUEST)
+    }
+
+    /// [`Net::get`] asking for `accept`, taking at most `max`.
+    pub fn get_as(
+        &self,
+        url: &str,
+        until: Instant,
+        accept: &str,
+        max: Duration,
+    ) -> Result<Response<Body>, Failed> {
         let start = Instant::now();
-        let left = until.saturating_duration_since(start).min(REQUEST);
-        let request = self.agent.get(url).config().timeout_global(Some(left));
+        let left = until.saturating_duration_since(start).min(max);
+        let request = self.agent.get(url).header("accept", accept);
+        let request = request.config().timeout_global(Some(left));
         let got = request.build().call().map_err(Failed::from_ureq);
         if self.debug {
             let outcome = match &got {
@@ -406,6 +421,11 @@ mod tests {
             private.to_string(),
             "www.example.com resolves to 10.0.0.1, a private address"
         );
+        let literal = Failed::Private {
+            host: "127.0.0.1".into(),
+            address: "127.0.0.1".parse().unwrap(),
+        };
+        assert_eq!(literal.to_string(), "127.0.0.1 is a private address");
         let refused = io::Error::from(io::ErrorKind::ConnectionRefused);
         assert_eq!(
             Failed::from_io(&refused),
