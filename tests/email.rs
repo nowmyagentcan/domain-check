@@ -1,5 +1,6 @@
 mod common;
 
+use common::web::Web;
 use common::{DnsStub, json};
 use serde_json::{Value, json as j};
 
@@ -1108,33 +1109,216 @@ fn without_selectors_the_8_common_ones_are_tried() {
     );
 }
 
+/// `check <domain> --checks email` with the web mock serving MTA-STS policies and BIMI files.
+fn fetched(stub: &DnsStub, web: &Web, domain: &str) -> Value {
+    let dns = stub.addr();
+    let args = [
+        domain,
+        "-c",
+        "email",
+        "--dns",
+        &dns,
+        "--ca-file",
+        &web.ca,
+        "--allow-private",
+    ];
+    let ports = web.ports(stub);
+    let (_, v) = json(&args, &[("DOMAIN_CHECK_LOOPBACK_PORTS", ports.as_str())]);
+    v["reports"][0].clone()
+}
+
 #[test]
 fn mta_sts_tls_rpt_and_bimi_records_are_read() {
-    let stub = DnsStub::new();
-    let (_, r) = email(&stub, "sts.example.net", &[]);
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let r = fetched(&stub, &web, "sts.example.net");
     let e = &r["email"];
+    let policy = j!({ "url": "https://mta-sts.sts.example.net/.well-known/mta-sts.txt",
+        "mode": "enforce", "mx": ["mx1.example.net"], "max_age": 604800, "error": null });
     assert_eq!(
         (&e["mta_sts"], &e["tls_rpt"], &e["bimi"]),
         (
-            &j!({ "record": "v=STSv1; id=20261030", "id": "20261030" }),
+            &j!({ "record": "v=STSv1; id=20261030", "id": "20261030", "policy": policy }),
             &j!({ "record": "v=TLSRPTv1; rua=mailto:tls@sts.example.net,https://report.example.net/tls",
                   "rua": ["mailto:tls@sts.example.net", "https://report.example.net/tls"] }),
             &j!({ "record": "v=BIMI1; l=https://sts.example.net/logo.svg; a=https://sts.example.net/vmc.pem",
-                  "logo": "https://sts.example.net/logo.svg", "certificate": "https://sts.example.net/vmc.pem" }),
+                  "logo": "https://sts.example.net/logo.svg", "certificate": "https://sts.example.net/vmc.pem",
+                  "logo_check": { "fetched": true, "content_type": "image/svg+xml", "tiny_ps": true, "error": null },
+                  "certificate_check": { "fetched": true, "pem": true, "error": null } }),
         )
     );
     for prefix in ["mta_sts", "tls_rpt", "bimi"] {
         assert_eq!(found(&r, prefix), [], "{prefix}");
     }
     assert_eq!(e["errors"], j!({}));
-    let (_, out, _) = common::run(
-        &["sts.example.net", "-c", "email", "--dns", &stub.addr()],
-        &[],
-    );
+    let hits: Vec<_> = web.hits().into_iter().map(|h| (h.host, h.path)).collect();
+    assert_eq!(hits.len(), 3, "{hits:?}");
+    let dns = stub.addr();
+    let ports = web.ports(&stub);
+    let args = [
+        "sts.example.net",
+        "-c",
+        "email",
+        "--dns",
+        &dns,
+        "--ca-file",
+        &web.ca,
+        "--allow-private",
+    ];
+    let (_, out, _) = common::run(&args, &[("DOMAIN_CHECK_LOOPBACK_PORTS", &ports)]);
     let line = out.lines().find(|l| l.starts_with("Email")).unwrap();
     assert_eq!(
         line,
-        "Email        SPF none · DMARC p=reject · DKIM none of 8 common selectors · MTA-STS yes · TLS-RPT yes · BIMI logo"
+        "Email        SPF none · DMARC p=reject · DKIM none of 8 common selectors · MTA-STS enforce · TLS-RPT yes · BIMI logo"
+    );
+}
+
+#[test]
+fn mta_sts_policies_load_only_as_rfc_8461_allows() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let unavailable = |domain: &str| {
+        let r = fetched(&stub, &web, domain);
+        let found = found(&r, "mta_sts_policy");
+        assert_eq!(found.len(), 1, "{domain}: {found:?}");
+        assert_eq!(found[0].0, "mta_sts_policy_unavailable");
+        assert_eq!(r["email"]["mta_sts"]["policy"]["mode"], Value::Null);
+        found[0].2.to_string()
+    };
+    let at = |d: &str, why: &str| {
+        format!(
+            "The MTA-STS policy at https://mta-sts.{d}/.well-known/mta-sts.txt couldn't be loaded: {why}."
+        )
+    };
+    let cases = [
+        (
+            "stsredirect.example.net",
+            "it redirects, which MTA-STS forbids".to_string(),
+        ),
+        ("sts404.example.net", "HTTP 404".into()),
+        ("stsbig.example.net", "it's larger than 64 KB".into()),
+        (
+            "stsname.example.net",
+            "the certificate isn't valid for mta-sts.stsname.example.net".into(),
+        ),
+        (
+            "stsonly.example.net",
+            "connection failed: mta-sts.stsonly.example.net has no A or AAAA record".into(),
+        ),
+    ];
+    for (domain, why) in cases {
+        assert_eq!(unavailable(domain), at(domain, &why));
+    }
+    let r = fetched(&stub, &web, "sts404.example.net");
+    assert_eq!(
+        finding(&r, "mta_sts_policy_unavailable").2,
+        "Senders that already cached the policy keep using it; fix the policy host."
+    );
+    let r = fetched(&stub, &web, "stssyntax.example.net");
+    let problems: Vec<_> = found(&r, "mta_sts_policy")
+        .into_iter()
+        .map(|f| f.2)
+        .collect();
+    assert_eq!(
+        problems,
+        [
+            "The MTA-STS policy is invalid: version isn't STSv1.",
+            "The MTA-STS policy is invalid: max_age forever isn't a number from 0 to 31557600.",
+            "The MTA-STS policy is invalid: mode block isn't enforce, testing or none.",
+            "The MTA-STS policy is invalid: it has no mx line.",
+        ]
+    );
+    assert_eq!(
+        finding(&r, "mta_sts_policy_syntax").2,
+        "See RFC 8461 §3.2 for the format."
+    );
+    // Every MX host must match an mx line; testing mode is reported.
+    let r = fetched(&stub, &web, "stsmx.example.net");
+    assert_eq!(
+        r["email"]["mta_sts"]["policy"]["mx"],
+        j!(["mx1.example.net", "*.mail.example.net"])
+    );
+    assert_eq!(
+        found(&r, "mta_sts"),
+        [
+            (
+                "mta_sts_mx_not_covered",
+                "error",
+                "MX host mx2.example.net doesn't match the MTA-STS policy's mx lines, so senders in enforce mode will refuse it."
+            ),
+            (
+                "mta_sts_testing",
+                "info",
+                "MTA-STS is in testing mode: failures are reported, not enforced."
+            ),
+        ]
+    );
+    assert_eq!(
+        finding(&r, "mta_sts_mx_not_covered").2,
+        "Add \"mx: mx2.example.net\" (or a matching *. pattern) to the policy and change its id."
+    );
+    // Without --allow-private the loopback policy host isn't contacted.
+    let dns = stub.addr();
+    let before = web.connections();
+    let (_, v) = json(&["sts.example.net", "-c", "email", "--dns", &dns], &[]);
+    let r = &v["reports"][0];
+    assert_eq!(found(r, "mta_sts"), []);
+    let private: Vec<_> = found(r, "private_address")
+        .into_iter()
+        .map(|f| f.2)
+        .collect();
+    assert_eq!(
+        private,
+        [
+            "mta-sts.sts.example.net resolves to 127.0.0.1, a private address, so the email check didn't connect to it.",
+            "sts.example.net resolves to 127.0.0.1, a private address, so the email check didn't connect to it.",
+        ]
+    );
+    assert_eq!(web.connections(), before);
+}
+
+#[test]
+fn bimi_logos_and_certificates_are_fetched() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let r = fetched(&stub, &web, "logo.example.org");
+    assert_eq!(
+        r["email"]["bimi"]["logo_check"],
+        j!({ "fetched": true, "content_type": "image/svg+xml", "tiny_ps": false, "error": null })
+    );
+    assert_eq!(
+        finding(&r, "bimi_logo_format"),
+        (
+            "warning",
+            "The BIMI logo isn't SVG Tiny PS (no baseProfile=\"tiny-ps\").",
+            &j!("Export it as SVG Tiny Portable/Secure.")
+        )
+    );
+    let r = fetched(&stub, &web, "stsmx.example.net");
+    let b = &r["email"]["bimi"];
+    assert_eq!(
+        b["logo_check"],
+        j!({ "fetched": false, "content_type": null, "tiny_ps": false, "error": "HTTP 404" })
+    );
+    assert_eq!(
+        b["certificate_check"],
+        j!({ "fetched": true, "pem": false, "error": "it holds no PEM certificate" })
+    );
+    assert_eq!(
+        found(&r, "bimi_")[..2],
+        [
+            (
+                "bimi_certificate_unavailable",
+                "warning",
+                "The BIMI certificate at https://stsmx.example.net/vmc.txt couldn't be loaded or isn't PEM: it holds no PEM certificate."
+            ),
+            (
+                "bimi_dmarc_not_enforced",
+                "warning",
+                "BIMI logos need DMARC p=quarantine or p=reject without test mode; the policy is p=quarantine; sp=none."
+            ),
+        ]
+    );
+    assert_eq!(
+        finding(&r, "bimi_logo_unavailable").1,
+        "The BIMI logo at https://stsmx.example.net/missing.svg couldn't be loaded: HTTP 404."
     );
 }
 

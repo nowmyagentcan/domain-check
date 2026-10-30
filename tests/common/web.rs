@@ -63,6 +63,28 @@ const GOOD: [(&str, &str); 7] = [
     ("Cross-Origin-Opener-Policy", "same-origin"),
 ];
 
+/// The MTA-STS policy of `mta-sts.<domain>`, by the domain's first label.
+fn sts_policy(host: &str) -> Reply {
+    let text = |body: &str| Reply::new(200, &[("Content-Type", "text/plain")], body);
+    match host.split('.').nth(1).unwrap_or_default() {
+        "stsmx" => text(
+            "version: STSv1\nmode: testing\nmx: mx1.example.net\nmx: *.mail.example.net\nmax_age: 86400\n",
+        ),
+        "stsredirect" => Reply::new(
+            301,
+            &[(
+                "Location",
+                "https://mta-sts.sts.example.net/.well-known/mta-sts.txt",
+            )],
+            "",
+        ),
+        "sts404" => Reply::new(404, &[], "not found\n"),
+        "stsbig" => text(&format!("version: STSv1\n{}", "#".repeat(70 * 1024))),
+        "stssyntax" => text("version: STSv2\nmode: block\nmax_age: forever\n"),
+        _ => text("version: STSv1\r\nmode: enforce\r\nmx: mx1.example.net\r\nmax_age: 604800\r\n"),
+    }
+}
+
 /// The answer to `path` on `host`: the first label of the host picks the site. Status 0 sends
 /// bytes that aren't HTTP.
 pub fn route(host: &str, path: &str, https: bool) -> Reply {
@@ -96,6 +118,24 @@ pub fn route(host: &str, path: &str, https: bool) -> Reply {
         ("status", true, "/") => to(301, "/missing"),
         ("status", true, _) => Reply::new(404, &GOOD, "not found\n"),
         ("garbage", true, _) => Reply::new(0, &[], ""),
+        ("mta-sts", true, "/.well-known/mta-sts.txt") => sts_policy(host),
+        ("sts", true, "/logo.svg") => Reply::new(
+            200,
+            &[("Content-Type", "image/svg+xml")],
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.2\" baseProfile=\"tiny-ps\"/>",
+        ),
+        ("sts", true, "/vmc.pem") => Reply::new(
+            200,
+            &[("Content-Type", "application/x-pem-file")],
+            "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+        ),
+        ("logo", true, "/l.svg") => Reply::new(
+            200,
+            &[("Content-Type", "image/svg+xml")],
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.2\"/>",
+        ),
+        ("stsmx", true, "/missing.svg") => Reply::new(404, &GOOD, ""),
+        ("stsmx", true, "/vmc.txt") => Reply::new(200, &[], "not a certificate\n"),
         ("headers", true, _) => Reply::new(
             200,
             &[

@@ -280,7 +280,11 @@ pub fn body(r: &mut Response<Body>, limit: u64) -> Result<Vec<u8>, Failed> {
     let read = r.body_mut().with_config().limit(limit).read_to_vec();
     read.map_err(|e| match e {
         ureq::Error::BodyExceedsLimit(_) => {
-            Failed::Other(format!("it's larger than {limit} bytes"))
+            let size = match limit % (1 << 20) {
+                0 => format!("{} MB", limit >> 20),
+                _ => format!("{} KB", limit >> 10),
+            };
+            Failed::Other(format!("it's larger than {size}"))
         }
         e => Failed::from_ureq(e),
     })

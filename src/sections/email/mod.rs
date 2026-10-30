@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::check::{Cx, Facts};
 use crate::dns::{self, Answer, Failure, RecordType, Resolver, ResponseCode};
+use crate::net::Net;
 use crate::report::{Check, Finding, Keyed, Section, Severity, Status};
 
 pub mod dkim;
@@ -51,7 +52,8 @@ pub struct MxHost {
 pub struct Mail {
     pub resolver: Arc<Resolver>,
     pub domain: String,
-    until: tokio::time::Instant,
+    pub net: Arc<Net>,
+    pub until: tokio::time::Instant,
 }
 
 /// The values of one type at a name: `None` for NXDOMAIN, `Err` with why the lookup failed.
@@ -112,6 +114,7 @@ pub async fn run(cx: &Cx, facts: &Facts) -> (Section<Email>, Vec<Finding>) {
     let mail = Arc::new(Mail {
         resolver: Arc::clone(&cx.resolver),
         domain: d.to_string(),
+        net: Arc::clone(&cx.net),
         until: cx.until(Check::Email).into(),
     });
     let spf = tokio::spawn(spf::run(Arc::clone(&mail), cx.spf_ip));

@@ -8,6 +8,7 @@ use crate::check::Mark;
 use crate::report::{Check, Output, Report, Section, Severity, Status};
 use crate::sections::dns::Dns;
 use crate::sections::email::Email;
+use crate::sections::email::policy::Policy;
 use crate::sections::propagation::Propagation;
 use crate::sections::tls::Tls;
 use crate::sections::web::{Chain, Web};
@@ -314,11 +315,20 @@ fn email(e: &Email) -> String {
         Some(_) => "declined",
         None => "none",
     };
+    let mta_sts = match &e.mta_sts {
+        None => "none",
+        Some(m) => match m.policy.as_ref().filter(|p| p.error.is_none()) {
+            Some(Policy {
+                mode: Some(mode), ..
+            }) => mode.as_str(),
+            _ => "policy unavailable",
+        },
+    };
     let mut parts = [
         spf,
         dmarc,
         dkim,
-        format!("MTA-STS {}", yes(e.mta_sts.is_some())),
+        format!("MTA-STS {mta_sts}"),
         format!("TLS-RPT {}", yes(e.tls_rpt.is_some())),
         format!("BIMI {bimi}"),
     ];
