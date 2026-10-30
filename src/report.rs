@@ -6,6 +6,7 @@ use serde_json::{Map, Value};
 
 use crate::input::Domain;
 use crate::sections::dns::Dns;
+use crate::sections::email::Email;
 use crate::sections::propagation::Propagation;
 use crate::{Error, RDAP_BOOTSTRAP};
 
@@ -187,6 +188,7 @@ impl<T: Serialize> Serialize for Keyed<T> {
 pub struct Sections {
     pub dns: Option<Section<Dns>>,
     pub propagation: Option<Section<Propagation>>,
+    pub email: Option<Section<Email>>,
 }
 
 impl Sections {
@@ -195,7 +197,8 @@ impl Sections {
         match check {
             Check::Dns => self.dns = Some(Section::not(status, reason)),
             Check::Propagation => self.propagation = Some(Section::not(status, reason)),
-            Check::Email | Check::Rdap | Check::Tls | Check::Http => {}
+            Check::Email => self.email = Some(Section::not(status, reason)),
+            Check::Rdap | Check::Tls | Check::Http => {}
         }
     }
 
@@ -204,6 +207,7 @@ impl Sections {
         let statuses = [
             self.dns.as_ref().map(|s| s.status),
             self.propagation.as_ref().map(|s| s.status),
+            self.email.as_ref().map(|s| s.status),
         ];
         statuses
             .into_iter()
@@ -446,7 +450,8 @@ mod tests {
                             "message": "dmarc_none message.", "hint": "Publish one."
                         }],
                         "dns": null,
-                        "propagation": null
+                        "propagation": null,
+                        "email": null
                     },
                     {
                         "input": "",
@@ -460,7 +465,8 @@ mod tests {
                         "counts": { "errors": 0, "warnings": 0, "info": 0 },
                         "findings": [],
                         "dns": null,
-                        "propagation": null
+                        "propagation": null,
+                        "email": null
                     }
                 ],
                 "summary": { "domains": 2, "errors": 1, "warnings": 0, "info": 0, "unavailable": 0 },

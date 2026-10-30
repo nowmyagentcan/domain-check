@@ -231,10 +231,72 @@ fn raw(t: RecordType, bytes: &[u8]) -> RData {
     }
 }
 
+/// The mail fixtures: owner, type, value. A listed owner exists and has no records of the
+/// types not listed for it; an owner `*.x` stands for every name under x that isn't listed.
+pub const MAIL: &[(&str, RecordType, &str)] = {
+    use RecordType::*;
+    &[
+        ("mx1.example.net", A, "192.0.2.25"),
+        ("mx2.example.net", A, "192.0.2.26"),
+        ("mx2.example.net", AAAA, "2001:db8::26"),
+        ("mx.example.net", MX, "10 mx1.example.net"),
+        ("mx.example.net", MX, "20 alias.example.net"),
+        ("mx.example.net", MX, "30 192.0.2.25"),
+        ("mx.example.net", MX, "40 gone.example.net"),
+        ("mx.example.net", MX, "50 noaddr.example.net"),
+        ("mx.example.net", MX, "60 servfail.example.net"),
+        ("alias.example.net", CNAME, "mx2.example.net"),
+        ("noaddr.example.net", TXT, "no address here"),
+        ("nullmx.example.net", MX, "0 ."),
+        ("implicit.example.net", A, "192.0.2.27"),
+        ("nomail.example.net", TXT, "no mail here"),
+    ]
+};
+
+/// `owner`'s records of `t` from [`MAIL`]; `None` when the table doesn't list the owner.
+fn mail(owner: &str, t: RecordType) -> Option<Vec<Record>> {
+    let listed = |o: &str| o == owner;
+    let wild = |o: &str| {
+        o.strip_prefix('*')
+            .is_some_and(|zone| owner.ends_with(zone))
+    };
+    let rows: Vec<_> = match MAIL.iter().any(|(o, _, _)| listed(o)) {
+        true => MAIL.iter().filter(|(o, _, _)| listed(o)).collect(),
+        false => MAIL.iter().filter(|(o, _, _)| wild(o)).collect(),
+    };
+    if rows.is_empty() {
+        return None;
+    }
+    let data = |t: RecordType, v: &str| match t {
+        RecordType::A => RData::A(A(v.parse().unwrap())),
+        RecordType::AAAA => RData::AAAA(AAAA(v.parse().unwrap())),
+        RecordType::CNAME => RData::CNAME(CNAME(name(v))),
+        RecordType::MX => {
+            let (preference, host) = v.split_once(' ').unwrap();
+            RData::MX(MX::new(preference.parse().unwrap(), name(host)))
+        }
+        // Strings of at most 255 bytes, as a long TXT record is published.
+        _ => RData::TXT(TXT::new(
+            v.as_bytes()
+                .chunks(255)
+                .map(|c| String::from_utf8(c.to_vec()).unwrap())
+                .collect(),
+        )),
+    };
+    let rows = rows.into_iter().filter(|(_, rt, _)| *rt == t);
+    Some(
+        rows.map(|(_, rt, v)| record(owner, 300, data(*rt, v)))
+            .collect(),
+    )
+}
+
 /// `owner`'s records of type `t` as the server at `at` holds them (`None`: as a resolver sees
 /// them); `None` when the name doesn't exist, `[]` when it has no such records.
 pub fn records(owner: &str, t: RecordType, at: Option<IpAddr>) -> Option<Vec<Record>> {
     use RecordType as T;
+    if let Some(found) = mail(owner, t) {
+        return Some(found);
+    }
     let rec = |ttl, data| vec![record(owner, ttl, data)];
     let a = |ip: [u8; 4]| rec(300, RData::A(A(Ipv4Addr::from(ip))));
     let cname = |target: &str| rec(300, RData::CNAME(CNAME(name(target))));

@@ -2,7 +2,7 @@
 //! The one engine behind the CLI, the page and the MCP server.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
@@ -15,11 +15,12 @@ use crate::dns::{self, Answer, Failure, RecordType, Resolver, ResponseCode};
 use crate::input::{self, Domain};
 use crate::report::{Check, Finding, Output, Report, Section, Sections, Severity, Status};
 use crate::sections::dns::Dns;
+use crate::sections::email::Email;
 use crate::sections::propagation::Propagation;
 use crate::{Error, Ports, sections};
 
 /// The checks this version runs, in report order.
-pub const CHECKS: [Check; 2] = [Check::Dns, Check::Propagation];
+pub const CHECKS: [Check; 3] = [Check::Dns, Check::Propagation, Check::Email];
 
 pub struct Options {
     pub checks: Vec<Check>,
@@ -28,6 +29,10 @@ pub struct Options {
     pub resolvers: Vec<SocketAddr>,
     /// The record types `propagation` compares.
     pub types: Vec<RecordType>,
+    /// `--dkim-selector`: the DKIM selectors to look up instead of the common ones.
+    pub selectors: Vec<String>,
+    /// `--spf-ip`: also evaluate SPF for mail sent from this address.
+    pub spf_ip: Option<IpAddr>,
     pub ports: Ports,
     pub debug: bool,
 }
@@ -75,6 +80,17 @@ pub struct Cx {
     pub domain: String,
     pub resolvers: Vec<(&'static str, SocketAddr)>,
     pub types: Vec<RecordType>,
+    pub selectors: Vec<String>,
+    pub spf_ip: Option<IpAddr>,
+    /// When the domain's check began: every section's budget counts from here.
+    pub started: Instant,
+}
+
+impl Cx {
+    /// When `check`'s lookups must give up, so the section still reports in time.
+    pub fn until(&self, check: Check) -> Instant {
+        self.started + deadline(budget(check)).0 - Duration::from_secs(1)
+    }
 }
 
 /// The answers every section starts from, asked once per domain.
@@ -86,7 +102,12 @@ pub struct Facts {
 
 impl Facts {
     pub async fn gather(cx: &Cx) -> Facts {
-        let types = [RecordType::SOA, RecordType::A, RecordType::AAAA];
+        let types = [
+            RecordType::SOA,
+            RecordType::A,
+            RecordType::AAAA,
+            RecordType::MX,
+        ];
         let got = dns::lookups(&cx.resolver, &cx.domain, &types).await;
         let answers: Vec<_> = types.into_iter().zip(got).collect();
         let zone = match &answers[0].1 {
@@ -252,6 +273,7 @@ fn deadline(budget: Duration) -> (Duration, String) {
 enum Part {
     Dns(Section<Dns>),
     Propagation(Section<Propagation>),
+    Email(Section<Email>),
     Down(Status, String),
 }
 
@@ -280,6 +302,9 @@ fn checked(d: &Domain, resolver: Arc<Resolver>, o: &Options, progress: &mut Prog
         domain: d.ascii.clone(),
         resolvers: resolvers(&o.resolvers),
         types: o.types.clone(),
+        selectors: o.selectors.clone(),
+        spf_ip: o.spf_ip,
+        started: start,
     });
     let (tx, rx) = mpsc::channel();
     let wanted = o.checks.clone();
@@ -296,6 +321,7 @@ fn checked(d: &Domain, resolver: Arc<Resolver>, o: &Options, progress: &mut Prog
         match outcome.part {
             Part::Dns(s) => sections.dns = Some(s),
             Part::Propagation(s) => sections.propagation = Some(s),
+            Part::Email(s) => sections.email = Some(s),
             Part::Down(status, why) => sections.not(outcome.check, status, &why),
         }
         findings.extend(outcome.findings);
@@ -340,6 +366,10 @@ fn section(check: Check, cx: &Cx, facts: &Facts) -> Outcome {
             let (s, f) = rt.block_on(sections::propagation::run(cx, facts));
             (Part::Propagation(s), f)
         }
+        Check::Email => {
+            let (s, f) = rt.block_on(sections::email::run(cx, facts));
+            (Part::Email(s), f)
+        }
         _ => (
             Part::Down(Status::Skipped, "not requested".into()),
             Vec::new(),
@@ -381,6 +411,7 @@ fn collect(
                 let status = done.iter().find(|o| o.check == c).map(|o| match &o.part {
                     Part::Dns(s) => s.status,
                     Part::Propagation(s) => s.status,
+                    Part::Email(s) => s.status,
                     Part::Down(status, _) => *status,
                 });
                 let mark = match status {
@@ -435,7 +466,7 @@ mod tests {
             (e.code, e.message.as_str()),
             ("usage", "Unknown check 'smtp'.")
         );
-        assert_eq!(e.hint.unwrap(), "Use dns, propagation or all.");
+        assert_eq!(e.hint.unwrap(), "Use dns, propagation, email or all.");
     }
 
     #[test]
@@ -472,7 +503,8 @@ mod tests {
             Check::Dns => Duration::from_secs(1),
             _ => Duration::from_secs(10),
         };
-        let done = collect(&rx, &CHECKS, start, quick, |_, _| {});
+        let both = [Check::Dns, Check::Propagation];
+        let done = collect(&rx, &both, start, quick, |_, _| {});
         let took = start.elapsed();
         assert!((1.0..3.0).contains(&took.as_secs_f64()), "{took:?}");
         let mut got: Vec<_> = done.iter().map(reason).collect();

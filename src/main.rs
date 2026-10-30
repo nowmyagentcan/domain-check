@@ -17,7 +17,7 @@ const SENTENCE: &str =
 const USAGE: &str = "domain-check [check] <DOMAIN>... [OPTIONS]
        domain-check <COMMAND>";
 
-const AFTER_HELP: &str = "Checks: dns, propagation.
+const AFTER_HELP: &str = "Checks: dns, propagation, email.
 Only ports 53, 80 and 443 are contacted; nothing is stored.
 
 \x1b[1;4mEnvironment:\x1b[0m
@@ -64,7 +64,7 @@ struct CheckArgs {
     /// a domain, URL or email address
     #[arg(value_name = "DOMAIN")]
     domains: Vec<String>,
-    /// sections to run: dns, propagation or all
+    /// sections to run: dns, propagation, email or all
     #[arg(
         short,
         long,
@@ -180,6 +180,8 @@ fn run_check(args: CheckArgs) -> Result<Done, Error> {
             .map(|s| dns::server("--resolver", s))
             .collect::<Result<_, _>>()?,
         types: lookup::types(&args.types)?,
+        selectors: Vec::new(),
+        spf_ip: None,
         ports: Ports::from_env()?,
         debug: args.debug,
     };

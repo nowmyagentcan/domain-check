@@ -418,10 +418,8 @@ fn slow_answers_keep_each_section_inside_its_budget() {
     assert!(took < 15.0, "{took} s");
     assert_eq!(code, 0, "{v}");
     let r = &v["reports"][0];
-    assert_eq!(
-        (&r["dns"]["status"], &r["propagation"]["status"]),
-        (&j!("ok"), &j!("ok"))
-    );
+    let statuses = ["dns", "propagation", "email"].map(|s| &r[s]["status"]);
+    assert_eq!(statuses, [&j!("ok"); 3]);
     assert_eq!(r["propagation"]["consistent"], true);
 }
 
@@ -443,7 +441,8 @@ fn a_silent_resolver_makes_every_section_unavailable_quickly() {
     );
     let reason = j!("No DNS answer, so this check couldn't run.");
     assert_eq!(r["propagation"]["reason"], reason);
-    assert_eq!(v["summary"]["unavailable"], 2);
+    assert_eq!(r["email"]["reason"], reason);
+    assert_eq!(v["summary"]["unavailable"], 3);
 }
 
 /// The text report, with each `checked HH:MM UTC` turned into `checked T`.
@@ -468,7 +467,7 @@ fn text(stub: &DnsStub, args: &[&str], env: &[(&str, &str)]) -> (i32, String) {
 #[test]
 fn the_text_report_puts_findings_first_then_one_line_per_section() {
     let stub = DnsStub::new();
-    let (code, out) = text(&stub, &["example.com"], &[]);
+    let (code, out) = text(&stub, &["example.com", "-c", "dns,propagation"], &[]);
     assert_eq!(code, 0);
     let want = "example.com  No problems found · checked T
 
@@ -512,7 +511,8 @@ Propagation  skipped: not requested
 #[test]
 fn findings_line_up_and_sections_that_couldnt_run_say_why() {
     let stub = DnsStub::new();
-    let (_, out) = text(&stub, &["slow.example.org", "-t", "A"], &[]);
+    let args = ["slow.example.org", "-t", "A", "-c", "dns,propagation"];
+    let (_, out) = text(&stub, &args, &[]);
     let want = "slow.example.org  1 warning · 2 info · checked T
 ! propagation  Nameserver ns2.example.net (::1) didn't answer within 4 s.
                It may be down, or your network may block DNS to outside servers.
@@ -526,7 +526,8 @@ Propagation  consistent: 1 nameserver addresses, 2 resolvers agree on A · 1 nam
     assert_eq!(out, want);
 
     let silent = DnsStub::start(|_| None);
-    let (code, out) = text(&silent, &["xn--bcher-kva.example.com"], &[]);
+    let args = ["xn--bcher-kva.example.com", "-c", "dns,propagation"];
+    let (code, out) = text(&silent, &args, &[]);
     assert_eq!(code, 3);
     let want = format!(
         "xn--bcher-kva.example.com (bücher.example.com)  2 checks couldn't run · checked T
