@@ -365,22 +365,43 @@ where
     let tasks: Vec<_> = futures.into_iter().map(tokio::spawn).collect();
     let mut out = Vec::with_capacity(tasks.len());
     for task in tasks {
-        match task.await {
-            Ok(v) => out.push(v),
-            // A task fails only by panicking, and panics abort in release builds.
-            Err(e) => std::panic::resume_unwind(e.into_panic()),
-        }
+        out.push(wait(task).await);
     }
     out
 }
 
+/// A spawned task's output.
+pub async fn wait<T>(task: tokio::task::JoinHandle<T>) -> T {
+    match task.await {
+        Ok(v) => v,
+        // A task fails only by panicking, and panics abort in release builds.
+        Err(e) => std::panic::resume_unwind(e.into_panic()),
+    }
+}
+
 /// Asks the resolver for several types of one name, up to 8 at a time.
 pub async fn lookups(r: &Arc<Resolver>, name: &str, types: &[RecordType]) -> Vec<Answer> {
-    let mut out = Vec::with_capacity(types.len());
-    for chunk in types.chunks(8) {
-        let asks = chunk.iter().map(|&t| {
-            let (r, name) = (Arc::clone(r), name.to_string());
-            async move { r.lookup(&name, t).await }
+    let questions: Vec<_> = types.iter().map(|&t| (name.to_string(), t)).collect();
+    ask_all(r, None, questions, RECURSIVE).await
+}
+
+/// Asks `server` (the resolver when `None`) each question, up to 8 at a time.
+pub async fn ask_all(
+    r: &Arc<Resolver>,
+    server: Option<SocketAddr>,
+    questions: Vec<(String, RecordType)>,
+    ask: Ask,
+) -> Vec<Answer> {
+    let mut out = Vec::with_capacity(questions.len());
+    for chunk in questions.chunks(8) {
+        let asks = chunk.iter().cloned().map(|(name, t)| {
+            let r = Arc::clone(r);
+            async move {
+                match server {
+                    Some(at) => r.query(at, &name, t, ask).await,
+                    None => r.lookup(&name, t).await,
+                }
+            }
         });
         out.extend(join(asks).await);
     }

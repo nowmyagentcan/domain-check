@@ -1,5 +1,6 @@
 mod common;
 
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 
 use common::{DnsStub, closed_udp_port, json};
@@ -431,4 +432,154 @@ fn a_bogus_zone_fails_validation_and_loads_with_checking_disabled() {
     let (_, r) = dns_report(&stub, "servfail.example.com");
     assert_eq!(r["dns"]["dnssec"]["bogus"], false);
     assert!(!codes(&r).contains(&"dnssec_bogus"));
+}
+
+/// `check <domain> --checks propagation` with 127.0.0.1 and ::1 as the zone's nameservers.
+fn propagation(stub: &DnsStub, domain: &str, extra: &[&str]) -> (i32, Value) {
+    let (dns, ports) = (stub.addr(), stub.ports());
+    let base = [
+        domain,
+        "-c",
+        "propagation",
+        "--dns",
+        &dns,
+        "--resolver",
+        &dns,
+    ];
+    let env = [("DOMAIN_CHECK_LOOPBACK_PORTS", ports.as_str())];
+    let (code, v) = json(&[&base[..], extra].concat(), &env);
+    (code, v["reports"][0].clone())
+}
+
+#[test]
+fn each_authoritative_nameserver_is_asked_directly() {
+    let stub = DnsStub::new();
+    let (code, r) = propagation(&stub, "example.com", &[]);
+    assert_eq!(code, 0, "{r}");
+    let p = &r["propagation"];
+    assert_eq!((&p["status"], &p["zone"]), (&j!("ok"), &j!("example.com")));
+    assert_eq!(p["types"], j!(["A", "AAAA", "MX", "TXT"]));
+    assert_eq!(p["varies"], j!([]));
+    let got = |values: &[&str], ttl| j!({ "rcode": "NOERROR", "values": values, "ttl": ttl });
+    let answers = j!({
+        "A": got(&["192.0.2.10"], 300),
+        "AAAA": got(&["2001:db8::10"], 300),
+        "MX": got(&["20 mx2.example.net", "10 mx1.example.net"], 3600),
+        "TXT": got(&["v=spf1 ip4:192.0.2.0/24 -all"], 300),
+    });
+    let server = |name: &str, address: &str| j!({ "server": name, "address": address, "status": "ok", "soa_serial": 2026103001, "answers": answers });
+    let want = j!([
+        server("ns1.example.net", "127.0.0.1"),
+        server("ns2.example.net", "::1")
+    ]);
+    assert_eq!(p["authoritative"], want);
+    assert!(codes(&r).is_empty());
+    let direct: Vec<_> = stub.queries().into_iter().filter(|q| !q.rd).collect();
+    assert_eq!(direct.len(), 10, "SOA and four types at each address");
+    assert!(direct.iter().all(|q| q.dnssec_ok));
+    let at: BTreeSet<_> = direct.iter().map(|q| q.at.to_string()).collect();
+    assert_eq!(
+        at,
+        BTreeSet::from(["127.0.0.1".to_string(), "::1".to_string()])
+    );
+    let soa: Vec<_> = direct
+        .iter()
+        .filter(|q| q.qtype == RecordType::SOA)
+        .collect();
+    assert!(soa.iter().all(|q| q.name == "example.com"));
+
+    let (_, r) = propagation(&stub, "www.example.com", &["-t", "a,CNAME"]);
+    let p = &r["propagation"];
+    assert_eq!(
+        (&p["zone"], &p["types"]),
+        (&j!("example.com"), &j!(["A", "CNAME"]))
+    );
+    let a = &p["authoritative"][0]["answers"];
+    assert_eq!(a["A"]["values"], j!(["CNAME example.com"]));
+    assert_eq!(a["CNAME"]["values"], j!(["example.com"]));
+
+    let (code, r) = propagation(&stub, "nope.example.com", &["-t", "A"]);
+    assert_eq!(code, 0, "only the dns section reports a missing name");
+    let a = &r["propagation"]["authoritative"][1]["answers"]["A"];
+    assert_eq!(a, &j!({ "rcode": "NXDOMAIN", "values": [], "ttl": 3600 }));
+}
+
+#[test]
+fn lame_silent_and_single_nameservers_are_flagged() {
+    let stub = DnsStub::new();
+    for (zone, why) in [
+        ("noaa.example.org", "no AA flag"),
+        ("lamefail.example.org", "SERVFAIL"),
+        ("lamerefused.example.org", "REFUSED"),
+    ] {
+        let (code, r) = propagation(&stub, zone, &[]);
+        assert_eq!(code, 1, "{zone}");
+        let message = format!(
+            "Nameserver ns2.example.net (::1) doesn't answer authoritatively for {zone} ({why})."
+        );
+        let hint =
+            j!("Fix it at your DNS host, or remove it from the NS records and at your registrar.");
+        assert_eq!(finding(&r, "ns_lame"), ("error", message.as_str(), &hint));
+        let servers = &r["propagation"]["authoritative"];
+        assert_eq!(
+            (&servers[0]["status"], &servers[1]["status"]),
+            (&j!("ok"), &j!("lame"))
+        );
+    }
+
+    let started = std::time::Instant::now();
+    let (code, r) = propagation(&stub, "slow.example.org", &["-t", "A"]);
+    assert!(started.elapsed().as_secs() < 8);
+    assert_eq!(code, 0);
+    let message = "Nameserver ns2.example.net (::1) didn't answer within 4 s.";
+    let hint = j!("It may be down, or your network may block DNS to outside servers.");
+    assert_eq!(finding(&r, "ns_timeout"), ("warning", message, &hint));
+    let silent = &r["propagation"]["authoritative"][1];
+    assert_eq!(
+        (&silent["status"], &silent["soa_serial"], &silent["answers"]),
+        (&j!("timeout"), &Value::Null, &j!({}))
+    );
+
+    let (_, r) = propagation(&stub, "single.example.org", &[]);
+    let hint = j!("Use at least two, on different networks (RFC 2182).");
+    let message = "single.example.org has only one nameserver.";
+    assert_eq!(finding(&r, "ns_single"), ("warning", message, &hint));
+    assert_eq!(
+        r["propagation"]["authoritative"].as_array().unwrap().len(),
+        1
+    );
+}
+
+#[test]
+fn nameservers_that_disagree_are_named() {
+    let stub = DnsStub::new();
+    let (code, r) = propagation(&stub, "serial.example.org", &[]);
+    assert_eq!(code, 0);
+    let message = "The nameservers serve different versions of serial.example.org: serial 2026103001 on ns1.example.net, 2026103002 on ns2.example.net.";
+    let hint = j!("A change may still be reaching the secondaries, or one stopped updating.");
+    assert_eq!(
+        finding(&r, "soa_serial_mismatch"),
+        ("warning", message, &hint)
+    );
+
+    let (code, r) = propagation(&stub, "geo.example.org", &[]);
+    assert_eq!(code, 0);
+    assert_eq!(r["propagation"]["varies"], j!(["A"]));
+    let message = "The nameservers give different A answers for geo.example.org (normal for geo-DNS or load balancing), so resolvers aren't compared for A.";
+    assert_eq!(
+        finding(&r, "propagation_varies"),
+        ("info", message, &Value::Null)
+    );
+    assert_eq!(codes(&r), ["propagation_varies"]);
+}
+
+#[test]
+fn propagation_needs_the_zone() {
+    let stub = DnsStub::new();
+    let (code, r) = propagation(&stub, "servfail.example.com", &[]);
+    assert_eq!(code, 3);
+    let p = &r["propagation"];
+    let reason = j!("No DNS answer, so this check couldn't run.");
+    assert_eq!((&p["status"], &p["reason"]), (&j!("unavailable"), &reason));
+    assert_eq!(r["dns"]["status"], "skipped");
 }

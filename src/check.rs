@@ -13,13 +13,15 @@ use crate::report::{Check, Finding, Output, Report, Section, Sections, Severity,
 use crate::{Error, Ports, sections};
 
 /// The checks this version runs, in report order.
-pub const CHECKS: [Check; 1] = [Check::Dns];
+pub const CHECKS: [Check; 2] = [Check::Dns, Check::Propagation];
 
 pub struct Options {
     pub checks: Vec<Check>,
     pub dns: Option<SocketAddr>,
     /// `--resolver`: replaces the public resolvers when given.
     pub resolvers: Vec<SocketAddr>,
+    /// The record types `propagation` compares.
+    pub types: Vec<RecordType>,
     pub ports: Ports,
     pub debug: bool,
 }
@@ -66,6 +68,7 @@ pub struct Cx {
     pub resolver: Arc<Resolver>,
     pub domain: String,
     pub resolvers: Vec<(&'static str, SocketAddr)>,
+    pub types: Vec<RecordType>,
 }
 
 /// The answers every section starts from, asked once per domain.
@@ -178,6 +181,7 @@ fn domain(input: &str, d: &Domain, resolver: Arc<Resolver>, o: &Options) -> Resu
         resolver,
         domain: d.ascii.clone(),
         resolvers: resolvers(&o.resolvers),
+        types: o.types.clone(),
     };
     let rt = crate::runtime()?;
     let facts = rt.block_on(Facts::gather(&cx));
@@ -190,15 +194,23 @@ fn domain(input: &str, d: &Domain, resolver: Arc<Resolver>, o: &Options) -> Resu
         let f = Finding::new(Check::Dns, Severity::Info, "port_ignored", message, "");
         findings.push(f);
     }
-    let dns = match o.checks.contains(&Check::Dns) {
-        true => {
-            let (section, found) = rt.block_on(sections::dns::run(&cx, &facts));
-            findings.extend(found);
-            section
-        }
-        false => Section::not(Status::Skipped, "not requested"),
+    fn skipped<T>() -> Section<T> {
+        Section::not(Status::Skipped, "not requested")
+    }
+    let mut sections = Sections {
+        dns: Some(skipped()),
+        propagation: Some(skipped()),
     };
-    let sections = Sections { dns: Some(dns) };
+    if o.checks.contains(&Check::Dns) {
+        let (section, found) = rt.block_on(sections::dns::run(&cx, &facts));
+        sections.dns = Some(section);
+        findings.extend(found);
+    }
+    if o.checks.contains(&Check::Propagation) {
+        let (section, found) = rt.block_on(sections::propagation::run(&cx, &facts));
+        sections.propagation = Some(section);
+        findings.extend(found);
+    }
     Ok(Report::checked(input, d, checked_at, findings, sections))
 }
 
@@ -216,7 +228,7 @@ mod tests {
             (e.code, e.message.as_str()),
             ("usage", "Unknown check 'smtp'.")
         );
-        assert_eq!(e.hint.unwrap(), "Use dns or all.");
+        assert_eq!(e.hint.unwrap(), "Use dns, propagation or all.");
     }
 
     #[test]

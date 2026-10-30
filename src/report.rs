@@ -6,6 +6,7 @@ use serde_json::{Map, Value};
 
 use crate::input::Domain;
 use crate::sections::dns::Dns;
+use crate::sections::propagation::Propagation;
 use crate::{Error, RDAP_BOOTSTRAP};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -185,12 +186,16 @@ impl<T: Serialize> Serialize for Keyed<T> {
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Sections {
     pub dns: Option<Section<Dns>>,
+    pub propagation: Option<Section<Propagation>>,
 }
 
 impl Sections {
     /// Sections that came back `unavailable` or `rate_limited`.
     pub fn unavailable(&self) -> usize {
-        let statuses = [self.dns.as_ref().map(|s| s.status)];
+        let statuses = [
+            self.dns.as_ref().map(|s| s.status),
+            self.propagation.as_ref().map(|s| s.status),
+        ];
         statuses
             .into_iter()
             .filter(|s| matches!(s, Some(Status::Unavailable | Status::RateLimited)))
@@ -356,6 +361,7 @@ mod tests {
         let at = "2026-10-30T15:40:12Z".to_string();
         let sections = Sections {
             dns: down.then(|| Section::not(Status::Unavailable, "Stopped after 30 s.")),
+            ..Sections::default()
         };
         Report::checked(
             "https://Example.COM/shop",
@@ -430,7 +436,8 @@ mod tests {
                             "code": "dmarc_none", "severity": "error", "check": "email",
                             "message": "dmarc_none message.", "hint": "Publish one."
                         }],
-                        "dns": null
+                        "dns": null,
+                        "propagation": null
                     },
                     {
                         "input": "",
@@ -443,7 +450,8 @@ mod tests {
                         },
                         "counts": { "errors": 0, "warnings": 0, "info": 0 },
                         "findings": [],
-                        "dns": null
+                        "dns": null,
+                        "propagation": null
                     }
                 ],
                 "summary": { "domains": 2, "errors": 1, "warnings": 0, "info": 0, "unavailable": 0 },

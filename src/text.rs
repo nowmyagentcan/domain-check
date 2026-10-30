@@ -3,6 +3,7 @@
 
 use crate::report::{Check, Report, Section, Severity};
 use crate::sections::dns::Dns;
+use crate::sections::propagation::Propagation;
 
 /// Every report, a blank line apart.
 pub fn output(reports: &[Report]) -> String {
@@ -34,7 +35,12 @@ pub fn report(r: &Report) -> String {
     }
     out += "\n";
     let s = &r.sections;
-    let lines = [s.dns.as_ref().map(|x| (Check::Dns, line(x, dns)))];
+    let lines = [
+        s.dns.as_ref().map(|x| (Check::Dns, line(x, dns))),
+        s.propagation
+            .as_ref()
+            .map(|x| (Check::Propagation, line(x, propagation))),
+    ];
     for (check, line) in lines.into_iter().flatten() {
         out += &format!("{:13}{line}\n", check.title());
     }
@@ -117,4 +123,20 @@ fn dns(d: &Dns) -> String {
     };
     parts.push(format!("DNSSEC {dnssec}"));
     parts.join(" · ")
+}
+
+fn propagation(p: &Propagation) -> String {
+    let answered = p.authoritative.iter().filter(|s| s.status == "ok").count();
+    let silent = p
+        .authoritative
+        .iter()
+        .filter(|s| s.status != "ok" && s.status != "no_route")
+        .count();
+    let mut out = format!("{answered} nameserver addresses answer");
+    match silent {
+        0 => {}
+        1 => out += " · 1 nameserver address didn't answer",
+        n => out += &format!(" · {n} nameserver addresses didn't answer"),
+    }
+    out
 }

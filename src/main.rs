@@ -17,7 +17,7 @@ const SENTENCE: &str =
 const USAGE: &str = "domain-check [check] <DOMAIN>... [OPTIONS]
        domain-check <COMMAND>";
 
-const AFTER_HELP: &str = "Checks: dns.
+const AFTER_HELP: &str = "Checks: dns, propagation.
 Only ports 53, 80 and 443 are contacted; nothing is stored.
 
 \x1b[1;4mEnvironment:\x1b[0m
@@ -25,6 +25,7 @@ Only ports 53, 80 and 443 are contacted; nothing is stored.
 
 \x1b[1;4mExamples:\x1b[0m
   domain-check example.com
+  domain-check example.com --checks propagation --types A,MX
   domain-check lookup _dmarc.example.com TXT
   domain-check lookup 8.8.8.8
   domain-check example.com example.org --json";
@@ -62,7 +63,7 @@ struct CheckArgs {
     /// a domain, URL or email address
     #[arg(value_name = "DOMAIN")]
     domains: Vec<String>,
-    /// sections to run: dns or all
+    /// sections to run: dns, propagation or all
     #[arg(
         short,
         long,
@@ -71,6 +72,15 @@ struct CheckArgs {
         default_value = "all"
     )]
     checks: Vec<String>,
+    /// record types compared in propagation
+    #[arg(
+        short,
+        long,
+        value_name = "LIST",
+        value_delimiter = ',',
+        default_value = "A,AAAA,MX,TXT"
+    )]
+    types: Vec<String>,
     /// resolver for every lookup except the comparisons
     #[arg(long, value_name = "IP[:PORT]")]
     dns: Option<String>,
@@ -168,6 +178,7 @@ fn run_check(args: CheckArgs) -> Result<Done, Error> {
             .iter()
             .map(|s| dns::server("--resolver", s))
             .collect::<Result<_, _>>()?,
+        types: lookup::types(&args.types)?,
         ports: Ports::from_env()?,
         debug: args.debug,
     };

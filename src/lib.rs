@@ -7,6 +7,7 @@ pub mod lookup;
 pub mod report;
 pub mod sections {
     pub mod dns;
+    pub mod propagation;
 }
 pub mod text;
 
