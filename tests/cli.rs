@@ -363,9 +363,12 @@ fn more_than_20_domains_is_a_usage_error() {
     let want = "✗ Too many domains: 21 given, at most 20 per run.\n  Split them into runs of 20 or fewer.\n";
     assert_eq!(err, want);
     assert!(stub.queries().is_empty());
-    let (code, out, err) = run(&["check", "--json"], &[]);
-    assert_eq!((code, out.as_str()), (2, ""));
-    assert_eq!(err, "✗ No domain given.\n  Try: domain-check example.com\n");
+    // With stdin not a terminal, no arguments means no domain rather than a session.
+    for args in [&["check", "--json"][..], &[]] {
+        let (code, out, err) = run(args, &[]);
+        assert_eq!((code, out.as_str()), (2, ""));
+        assert_eq!(err, "✗ No domain given.\n  Try: domain-check example.com\n");
+    }
 }
 
 #[test]

@@ -1,13 +1,15 @@
 use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, mpsc};
+use std::thread;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use domain_check::check::{self, Options};
 use domain_check::dns::{self, Resolver};
+use domain_check::report::Output;
 use domain_check::sections::email::dkim;
 use domain_check::sections::rdap;
-use domain_check::{Error, Ports, input, lookup, net, text};
+use domain_check::{Error, Ports, input, interactive, lookup, net, text};
 
 // clap prints the name itself.
 static VERSION: LazyLock<String> =
@@ -179,14 +181,9 @@ fn run_lookup(args: LookupArgs) -> Result<Done, Error> {
     Ok(Done { out, code })
 }
 
-fn run_check(args: CheckArgs) -> Result<Done, Error> {
-    if args.domains.is_empty() {
-        return Err(Error::usage(
-            "No domain given.",
-            "Try: domain-check example.com",
-        ));
-    }
-    let options = Options {
+/// The check options the flags ask for.
+fn options(args: &CheckArgs) -> Result<Options, Error> {
+    Ok(Options {
         checks: check::checks(&args.checks)?,
         dns: args
             .dns
@@ -231,22 +228,63 @@ fn run_check(args: CheckArgs) -> Result<Done, Error> {
         ports: Ports::from_env()?,
         bootstrap: rdap::from_env()?,
         debug: args.debug,
-    };
+    })
+}
+
+/// [`check::run`], with the progress line on a terminal's stderr unless `quiet`.
+fn checked(domains: &[String], o: &Options, quiet: bool) -> Result<Output, Error> {
     let mut line = Line {
-        on: !args.json && !args.debug && io::stderr().is_terminal(),
+        on: !quiet && !o.debug && io::stderr().is_terminal(),
         width: 0,
     };
-    let output = check::run(&args.domains, &options, &mut |domain, marks, secs| {
+    let output = check::run(domains, o, &mut |domain, marks, secs| {
         line.draw(&text::progress(domain, marks, secs))
     });
     line.clear();
-    let output = output?;
+    output
+}
+
+fn run_check(args: CheckArgs) -> Result<Done, Error> {
+    if args.domains.is_empty() {
+        return Err(Error::usage(
+            "No domain given.",
+            "Try: domain-check example.com",
+        ));
+    }
+    let output = checked(&args.domains, &options(&args)?, args.json)?;
     let out = match args.json {
         true => json(&output)?,
         false => text::output(&output),
     };
     let code = output.exit_code();
     Ok(Done { out, code })
+}
+
+/// The banner, then a prompt reading domains and session commands until /quit or the end of
+/// input.
+fn run_interactive(args: CheckArgs) -> Result<Done, Error> {
+    let mut options = options(&args)?;
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in io::stdin().lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut say = |text: &str| {
+        let mut out = anstream::stdout();
+        let _ = out.write_all(fit(&io::stdout(), text).as_bytes());
+        let _ = out.flush();
+    };
+    say(&interactive::banner(env!("CARGO_PKG_VERSION"), SENTENCE));
+    interactive::run(rx, &mut options, &mut say, &mut |domains, o| {
+        Ok(text::output(&checked(domains, o, false)?))
+    });
+    Ok(Done {
+        out: String::new(),
+        code: 0,
+    })
 }
 
 /// The progress line on a terminal's stderr, redrawn in place.
@@ -334,6 +372,13 @@ fn main() -> ExitCode {
     let done = match cli.command {
         Some(Command::Check(args)) => run_check(args),
         Some(Command::Lookup(args)) => run_lookup(args),
+        // No arguments at all, in a terminal: the interactive session.
+        None if std::env::args_os().len() == 1
+            && io::stdin().is_terminal()
+            && io::stdout().is_terminal() =>
+        {
+            run_interactive(cli.check)
+        }
         None => run_check(cli.check),
     };
     match done {

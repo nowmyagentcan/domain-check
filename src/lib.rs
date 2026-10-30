@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 pub mod check;
 pub mod dns;
 pub mod input;
+pub mod interactive;
 pub mod lookup;
 pub mod net;
 pub mod report;
