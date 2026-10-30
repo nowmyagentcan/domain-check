@@ -3,7 +3,7 @@
 //! guessing the registered name from a suffix list.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -167,6 +167,11 @@ fn pick(urls: &[String]) -> Option<String> {
 
 type File = Result<Arc<Bootstrap>, String>;
 
+/// A lock that outlives a section thread that panicked while holding it.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// What the domains of one run share: the bootstrap files, each read at most once, and when
 /// each RDAP host last answered.
 pub struct Run {
@@ -189,7 +194,7 @@ impl Run {
 
     /// The bundled file, or the one `DOMAIN_CHECK_RDAP_BOOTSTRAP` names.
     fn first(&self, net: &Net, until: Instant) -> File {
-        let mut slot = self.first.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = lock(&self.first);
         let read = || match &self.url {
             None => {
                 let mut b: Bootstrap = serde_json::from_str(RDAP_BOOTSTRAP_JSON)
@@ -204,7 +209,7 @@ impl Run {
 
     /// IANA's current file (or the override again), fetched once per run.
     fn live(&self, net: &Net, until: Instant) -> File {
-        let mut slot = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = lock(&self.live);
         let url = self.url.as_deref().unwrap_or(LIVE);
         slot.get_or_insert_with(|| self.fetch(net, url, until, "live"))
             .clone()
@@ -243,19 +248,11 @@ impl Run {
             *left = left.saturating_sub(1);
             let host = host(&url);
             let answered = |status| Got::Down(format!("{host} answered HTTP {status}."), None);
-            let last = self
-                .last
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&host)
-                .copied();
-            if let Some(at) = last {
+            if let Some(at) = lock(&self.last).get(&host).copied() {
                 thread::sleep(PACE.saturating_sub(at.elapsed()));
             }
             let response = net.get_as(&url, until, accept, TIMEOUT);
-            let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
-            last.insert(host.clone(), Instant::now());
-            drop(last);
+            lock(&self.last).insert(host.clone(), Instant::now());
             let got = match response {
                 Err(f) => Got::Down(format!("Couldn't reach {host}: {f}."), Some(f)),
                 Ok(mut r) => match r.status().as_u16() {
@@ -389,12 +386,13 @@ fn related(v: &Value) -> Option<String> {
         .filter(|h| Url::parse(h).is_ok_and(|u| usable(&u)))
 }
 
-/// The registrar entity's name (vCard `fn`) and IANA ID.
+/// The registrar entity's name (vCard `fn`) and IANA ID, and the registrar's own record;
+/// `None` when the record names none of these.
 fn registrar(v: &Value) -> Option<Registrar> {
-    let entities = v["entities"].as_array()?;
+    let mut entities = v["entities"].as_array().into_iter().flatten();
     let e = entities
-        .iter()
-        .find(|e| strings(&e["roles"]).iter().any(|r| r == "registrar"))?;
+        .find(|e| strings(&e["roles"]).iter().any(|r| r == "registrar"))
+        .unwrap_or(&Value::Null);
     let card = e["vcardArray"][1].as_array().into_iter().flatten();
     let name = card
         .filter(|p| p[0] == "fn")
@@ -403,11 +401,12 @@ fn registrar(v: &Value) -> Option<Registrar> {
     let iana_id = ids
         .filter(|p| p["type"] == "IANA Registrar ID")
         .find_map(|p| text(&p["identifier"]));
-    Some(Registrar {
+    let r = Registrar {
         name,
         iana_id,
-        rdap: None,
-    })
+        rdap: related(v),
+    };
+    (r.name.is_some() || r.iana_id.is_some() || r.rdap.is_some()).then_some(r)
 }
 
 /// The fields of an RDAP domain object (RFC 9083 §5.3; ICANN gTLD response profile 2.2).
@@ -415,15 +414,7 @@ fn read(v: &Value, rdap: &mut Rdap) {
     rdap.created = event(v, "registration");
     rdap.expires = event(v, "expiration");
     rdap.updated = event(v, "last changed");
-    rdap.registrar = match (registrar(v), related(v)) {
-        (Some(r), link) => Some(Registrar { rdap: link, ..r }),
-        (None, Some(link)) => Some(Registrar {
-            name: None,
-            iana_id: None,
-            rdap: Some(link),
-        }),
-        (None, None) => None,
-    };
+    rdap.registrar = registrar(v);
     rdap.domain_status = strings(&v["status"]);
     let servers = v["nameservers"].as_array().into_iter().flatten();
     rdap.nameservers = servers
