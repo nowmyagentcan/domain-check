@@ -59,17 +59,29 @@ impl DnsStub {
     pub fn start(zone: impl Fn(&Asked) -> Option<Reply> + Send + Sync + 'static) -> DnsStub {
         let zone: Arc<Zone> = Arc::new(zone);
         let log = Arc::new(Mutex::new(Vec::new()));
-        // One port free on both loopback addresses, for UDP and TCP.
-        let (port, sockets) = (0..50)
+        // One port free on both loopback addresses, for UDP and TCP. Windows reserves blocks
+        // of ports for one protocol only, and hands out the next free port in turn, so a port
+        // that fails stays held until the search ends.
+        let mut taken = Vec::new();
+        let (port, sockets) = (0..500)
             .find_map(|_| {
-                let udp4 = UdpSocket::bind("127.0.0.1:0").ok()?;
-                let port = udp4.local_addr().ok()?.port();
-                let udp6 = UdpSocket::bind(("::1", port)).ok()?;
-                let tcp4 = TcpListener::bind(("127.0.0.1", port)).ok()?;
-                let tcp6 = TcpListener::bind(("::1", port)).ok()?;
-                Some((port, (udp4, udp6, tcp4, tcp6)))
+                let tcp4 = TcpListener::bind("127.0.0.1:0").ok()?;
+                let port = tcp4.local_addr().ok()?.port();
+                let rest = || {
+                    let tcp6 = TcpListener::bind(("::1", port)).ok()?;
+                    let udp4 = UdpSocket::bind(("127.0.0.1", port)).ok()?;
+                    Some((udp4, UdpSocket::bind(("::1", port)).ok()?, tcp6))
+                };
+                match rest() {
+                    Some((udp4, udp6, tcp6)) => Some((port, (udp4, udp6, tcp4, tcp6))),
+                    None => {
+                        taken.push(tcp4);
+                        None
+                    }
+                }
             })
             .expect("a free port on 127.0.0.1 and ::1");
+        drop(taken);
         let (udp4, udp6, tcp4, tcp6) = sockets;
         for udp in [udp4, udp6] {
             let (zone, log) = (Arc::clone(&zone), Arc::clone(&log));
