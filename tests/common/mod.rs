@@ -17,6 +17,8 @@ use hickory_proto::rr::rdata::{
 };
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 
+pub mod web;
+
 /// One query as the stub received it.
 #[derive(Clone, Debug)]
 pub struct Asked {
@@ -252,7 +254,7 @@ fn raw(t: RecordType, bytes: &[u8]) -> RData {
     }
 }
 
-/// The mail fixtures: owner, type, value. A listed owner exists and has no records of the
+/// The mail and web fixtures: owner, type, value. A listed owner exists and has no records of the
 /// types not listed for it; an owner `*.x` stands for every name under x that isn't listed.
 #[rustfmt::skip]
 pub const MAIL: &[(&str, RecordType, &str)] = {
@@ -344,6 +346,23 @@ pub const MAIL: &[(&str, RecordType, &str)] = {
         ("default._bimi.declined.example.net", TXT, "v=BIMI1; l=;"),
         ("logo.example.org", A, "192.0.2.44"),
         ("default._bimi.logo.example.org", TXT, "v=BIMI1; l=https://logo.example.org/l.svg"),
+        // TLS: the first label says what the web mock does (tests/common/web.rs)
+        ("tls.example.com", A, "127.0.0.1"),
+        ("tls12.example.com", A, "127.0.0.1"),
+        ("old.example.com", A, "127.0.0.1"),
+        ("hangup.example.com", A, "127.0.0.1"),
+        ("expired.example.com", A, "127.0.0.1"),
+        ("future.example.com", A, "127.0.0.1"),
+        ("expiring.example.com", A, "127.0.0.1"),
+        ("lifetime.example.com", A, "127.0.0.1"),
+        ("wrongname.example.com", A, "127.0.0.1"),
+        ("selfsigned.example.com", A, "127.0.0.1"),
+        ("leafonly.example.com", A, "127.0.0.1"),
+        ("weak.example.com", A, "127.0.0.1"),
+        ("closed.example.com", AAAA, "::1"),
+        ("ten.example.com", A, "10.0.0.1"),
+        ("ula.example.com", AAAA, "fc00::1"),
+        ("mapped.example.com", AAAA, "::ffff:127.0.0.1"),
     ]
 };
 
@@ -399,9 +418,7 @@ fn der(tag: u8, body: &[u8]) -> Vec<u8> {
 /// as a bare RSAPublicKey.
 pub fn rsa_key(bits: usize, spki: bool) -> String {
     use base64::Engine;
-    let mut modulus = vec![0, 0xc5];
-    modulus.resize(bits / 8 + 1, 0x5a);
-    let key = der(0x30, &[der(0x02, &modulus), der(0x02, &[1, 0, 1])].concat());
+    let key = rsa_public_key(bits);
     let rsa_encryption = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
     let algorithm = der(0x30, &[der(0x06, &rsa_encryption), vec![0x05, 0]].concat());
     let spki_der = der(
@@ -409,6 +426,13 @@ pub fn rsa_key(bits: usize, spki: bool) -> String {
         &[algorithm, der(0x03, &[&[0][..], &key].concat())].concat(),
     );
     base64::engine::general_purpose::STANDARD.encode(if spki { spki_der } else { key })
+}
+
+/// An RSAPublicKey (RFC 8017 A.1.1) with a `bits`-bit modulus, in DER.
+pub fn rsa_public_key(bits: usize) -> Vec<u8> {
+    let mut modulus = vec![0, 0xc5];
+    modulus.resize(bits / 8 + 1, 0x5a);
+    der(0x30, &[der(0x02, &modulus), der(0x02, &[1, 0, 1])].concat())
 }
 
 /// The key records under `<selector>._domainkey.dkim.example.net`.

@@ -14,14 +14,16 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::dns::{self, Answer, Failure, RecordType, Resolver, ResponseCode};
 use crate::input::{self, Domain};
+use crate::net::Net;
 use crate::report::{Check, Finding, Output, Report, Section, Sections, Severity, Status};
 use crate::sections::dns::Dns;
 use crate::sections::email::Email;
 use crate::sections::propagation::Propagation;
+use crate::sections::tls::Tls;
 use crate::{Error, Ports, sections};
 
 /// The checks this version runs, in report order.
-pub const CHECKS: [Check; 3] = [Check::Dns, Check::Propagation, Check::Email];
+pub const CHECKS: [Check; 4] = [Check::Dns, Check::Propagation, Check::Email, Check::Tls];
 
 pub struct Options {
     pub checks: Vec<Check>,
@@ -81,6 +83,7 @@ pub fn checks(names: &[String]) -> Result<Vec<Check>, Error> {
 /// What every section of one domain's check works with.
 pub struct Cx {
     pub resolver: Arc<Resolver>,
+    pub net: Arc<Net>,
     pub domain: String,
     pub resolvers: Vec<(&'static str, SocketAddr)>,
     pub types: Vec<RecordType>,
@@ -123,6 +126,36 @@ impl Facts {
 
     pub fn answer(&self, t: RecordType) -> Option<&Answer> {
         self.answers.iter().find(|(x, _)| *x == t).map(|(_, a)| a)
+    }
+
+    /// The domain's first IPv4 and first IPv6 address, for a check that connects to it; or
+    /// the section's status and reason when there is none.
+    pub fn web_addresses(&self, domain: &str) -> Result<Vec<IpAddr>, (Status, String)> {
+        let no_answer = || {
+            let why = "No DNS answer, so this check couldn't run.";
+            (Status::Unavailable, why.to_string())
+        };
+        if self.unanswered().is_some() {
+            return Err(no_answer());
+        }
+        if !self.exists(domain) {
+            return Err((Status::Skipped, format!("{domain} doesn't exist in DNS.")));
+        }
+        let types = [RecordType::A, RecordType::AAAA];
+        let answers: Vec<_> = types.iter().filter_map(|&t| self.answer(t)).collect();
+        let first = |t| {
+            let m = self.answer(t)?.as_ref().ok()?;
+            dns::value(&dns::records(m, t).next()?.data).parse().ok()
+        };
+        let ips: Vec<IpAddr> = types.into_iter().filter_map(first).collect();
+        match ips.is_empty() {
+            false => Ok(ips),
+            true if answers.iter().all(|a| a.is_err()) => Err(no_answer()),
+            true => Err((
+                Status::Skipped,
+                format!("{domain} has no A or AAAA record."),
+            )),
+        }
     }
 
     /// Why nothing came back, when no query got any answer.
@@ -194,7 +227,7 @@ pub fn run(inputs: &[String], options: &Options, progress: &mut Progress) -> Res
             format!("Split them into runs of {MAX_DOMAINS} or fewer."),
         ));
     }
-    let mut resolver = None;
+    let mut net = None;
     let mut done: HashMap<String, Checked> = HashMap::new();
     let mut reports = Vec::with_capacity(inputs.len());
     for input in inputs {
@@ -208,7 +241,7 @@ pub fn run(inputs: &[String], options: &Options, progress: &mut Progress) -> Res
         let c = match done.get(&d.ascii) {
             Some(c) => c.clone(),
             None => {
-                let c = checked(&d, shared(&mut resolver, options)?, options, progress);
+                let c = checked(&d, shared(&mut net, options)?, options, progress);
                 done.insert(d.ascii.clone(), c.clone());
                 c
             }
@@ -238,14 +271,16 @@ pub fn run(inputs: &[String], options: &Options, progress: &mut Progress) -> Res
     Ok(Output::new(reports))
 }
 
-/// The run's resolver, set up when the first valid domain needs it.
-fn shared(slot: &mut Option<Arc<Resolver>>, o: &Options) -> Result<Arc<Resolver>, Error> {
-    if let Some(r) = slot {
-        return Ok(Arc::clone(r));
+/// The run's resolver and connections, set up when the first valid domain needs them.
+fn shared(slot: &mut Option<Arc<Net>>, o: &Options) -> Result<Arc<Net>, Error> {
+    if let Some(net) = slot {
+        return Ok(Arc::clone(net));
     }
-    let r = Arc::new(Resolver::new(o.dns, o.ports, o.debug)?);
-    *slot = Some(Arc::clone(&r));
-    Ok(r)
+    let resolver = Arc::new(Resolver::new(o.dns, o.ports, o.debug)?);
+    let (private, roots) = (o.allow_private, o.ca.clone());
+    let net = Arc::new(Net::new(resolver, o.ports, private, roots, o.debug));
+    *slot = Some(Arc::clone(&net));
+    Ok(net)
 }
 
 /// One domain's sections and findings.
@@ -278,6 +313,7 @@ enum Part {
     Dns(Section<Dns>),
     Propagation(Section<Propagation>),
     Email(Box<Section<Email>>),
+    Tls(Box<Section<Tls>>),
     Down(Status, String),
 }
 
@@ -298,11 +334,12 @@ impl Outcome {
 }
 
 /// The facts first, then every requested section on its own thread, each within its budget.
-fn checked(d: &Domain, resolver: Arc<Resolver>, o: &Options, progress: &mut Progress) -> Checked {
+fn checked(d: &Domain, net: Arc<Net>, o: &Options, progress: &mut Progress) -> Checked {
     let start = Instant::now();
     let checked_at = now();
     let cx = Arc::new(Cx {
-        resolver,
+        resolver: Arc::clone(&net.resolver),
+        net,
         domain: d.ascii.clone(),
         resolvers: resolvers(&o.resolvers),
         types: o.types.clone(),
@@ -326,6 +363,7 @@ fn checked(d: &Domain, resolver: Arc<Resolver>, o: &Options, progress: &mut Prog
             Part::Dns(s) => sections.dns = Some(s),
             Part::Propagation(s) => sections.propagation = Some(s),
             Part::Email(s) => sections.email = Some(*s),
+            Part::Tls(s) => sections.tls = Some(*s),
             Part::Down(status, why) => sections.not(outcome.check, status, &why),
         }
         findings.extend(outcome.findings);
@@ -374,6 +412,10 @@ fn section(check: Check, cx: &Cx, facts: &Facts) -> Outcome {
             let (s, f) = rt.block_on(sections::email::run(cx, facts));
             (Part::Email(Box::new(s)), f)
         }
+        Check::Tls => {
+            let (s, f) = sections::tls::run(cx, facts);
+            (Part::Tls(Box::new(s)), f)
+        }
         _ => (
             Part::Down(Status::Skipped, "not requested".into()),
             Vec::new(),
@@ -416,6 +458,7 @@ fn collect(
                     Part::Dns(s) => s.status,
                     Part::Propagation(s) => s.status,
                     Part::Email(s) => s.status,
+                    Part::Tls(s) => s.status,
                     Part::Down(status, _) => *status,
                 });
                 let mark = match status {
@@ -470,7 +513,7 @@ mod tests {
             (e.code, e.message.as_str()),
             ("usage", "Unknown check 'smtp'.")
         );
-        assert_eq!(e.hint.unwrap(), "Use dns, propagation, email or all.");
+        assert_eq!(e.hint.unwrap(), "Use dns, propagation, email, tls or all.");
     }
 
     #[test]

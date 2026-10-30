@@ -8,6 +8,7 @@ use crate::input::Domain;
 use crate::sections::dns::Dns;
 use crate::sections::email::Email;
 use crate::sections::propagation::Propagation;
+use crate::sections::tls::Tls;
 use crate::{Error, RDAP_BOOTSTRAP};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -189,6 +190,7 @@ pub struct Sections {
     pub dns: Option<Section<Dns>>,
     pub propagation: Option<Section<Propagation>>,
     pub email: Option<Section<Email>>,
+    pub tls: Option<Section<Tls>>,
 }
 
 impl Sections {
@@ -198,7 +200,8 @@ impl Sections {
             Check::Dns => self.dns = Some(Section::not(status, reason)),
             Check::Propagation => self.propagation = Some(Section::not(status, reason)),
             Check::Email => self.email = Some(Section::not(status, reason)),
-            Check::Rdap | Check::Tls | Check::Http => {}
+            Check::Tls => self.tls = Some(Section::not(status, reason)),
+            Check::Rdap | Check::Http => {}
         }
     }
 
@@ -208,6 +211,7 @@ impl Sections {
             self.dns.as_ref().map(|s| s.status),
             self.propagation.as_ref().map(|s| s.status),
             self.email.as_ref().map(|s| s.status),
+            self.tls.as_ref().map(|s| s.status),
         ];
         statuses
             .into_iter()
@@ -451,7 +455,8 @@ mod tests {
                         }],
                         "dns": null,
                         "propagation": null,
-                        "email": null
+                        "email": null,
+                        "tls": null
                     },
                     {
                         "input": "",
@@ -466,7 +471,8 @@ mod tests {
                         "findings": [],
                         "dns": null,
                         "propagation": null,
-                        "email": null
+                        "email": null,
+                        "tls": null
                     }
                 ],
                 "summary": { "domains": 2, "errors": 1, "warnings": 0, "info": 0, "unavailable": 0 },

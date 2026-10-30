@@ -115,7 +115,7 @@ impl fmt::Display for Failed {
 }
 
 impl Failed {
-    fn from_io(e: &io::Error) -> Failed {
+    pub fn from_io(e: &io::Error) -> Failed {
         if let Some(inner) = e.get_ref() {
             if let Some(f) = inner.downcast_ref::<Failed>() {
                 return f.clone();

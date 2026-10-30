@@ -9,6 +9,7 @@ use crate::report::{Check, Output, Report, Section, Severity, Status};
 use crate::sections::dns::Dns;
 use crate::sections::email::Email;
 use crate::sections::propagation::Propagation;
+use crate::sections::tls::Tls;
 
 fn paint(code: &str, s: &str) -> String {
     format!("\x1b[{code}m{s}\x1b[0m")
@@ -129,6 +130,7 @@ pub fn report(r: &Report) -> String {
             .as_ref()
             .map(|x| (Check::Propagation, line(x, propagation))),
         s.email.as_ref().map(|x| (Check::Email, line(x, email))),
+        s.tls.as_ref().map(|x| (Check::Tls, line(x, tls))),
     ];
     for (check, line) in lines.into_iter().flatten() {
         out += &format!("{}{line}\n", bold(&format!("{:13}", check.title())));
@@ -324,6 +326,29 @@ fn email(e: &Email) -> String {
             *part = format!("{} {why}", &part[..part.find(' ').unwrap_or(0)]);
         }
     }
+    parts.join(" · ")
+}
+
+/// The common name in a distinguished name like `C=US, O=Example, CN=R3`.
+fn cn(name: &str) -> &str {
+    let cn = name.split(", ").find_map(|part| part.strip_prefix("CN="));
+    cn.unwrap_or(name)
+}
+
+fn tls(t: &Tls) -> String {
+    let address = t.address.as_deref().unwrap_or_default();
+    let Some(protocol) = &t.protocol else {
+        return match t.chain.is_empty() {
+            true => format!("no TLS connection to {address}"),
+            false => "TLS handshake failed".into(),
+        };
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(leaf) = t.chain.first() {
+        parts.push(cn(&leaf.subject).into());
+        parts.push(cn(&leaf.issuer).into());
+    }
+    parts.push(protocol.replace("TLSv", "TLS "));
     parts.join(" · ")
 }
 

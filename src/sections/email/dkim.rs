@@ -142,6 +142,11 @@ fn rsa_bits(der: &[u8]) -> Option<usize> {
         Some(_) => return None,
         None => RSAPublicKey::from_der(der).ok()?.1.modulus,
     };
+    bits(modulus)
+}
+
+/// The bit length of an RSA modulus, leading zero bytes dropped.
+pub fn bits(modulus: &[u8]) -> Option<usize> {
     let m = &modulus[modulus.iter().position(|&b| b != 0)?..];
     Some(m.len() * 8 - m[0].leading_zeros() as usize)
 }
