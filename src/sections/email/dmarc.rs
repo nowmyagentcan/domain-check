@@ -200,12 +200,7 @@ async fn read(mail: &Arc<Mail>, name: &str, record: &str, found: &mut Vec<Findin
     if p == "none" {
         let message = "The DMARC policy is p=none, so receivers take no action on mail that fails.";
         let hint = "Move to p=quarantine, then p=reject, once the reports look clean.";
-        found.push(finding(
-            Severity::Warning,
-            "dmarc_p_none",
-            message.into(),
-            hint,
-        ));
+        found.push(finding(Severity::Warning, "dmarc_p_none", message, hint));
     }
     if tags.sp.as_deref() == Some("none") && !p.is_empty() && p != "none" {
         let message = format!("sp=none leaves subdomains unprotected while p={p}.");
@@ -217,7 +212,7 @@ async fn read(mail: &Arc<Mail>, name: &str, record: &str, found: &mut Vec<Findin
         found.push(finding(
             Severity::Info,
             "dmarc_testing",
-            message.into(),
+            message,
             "Remove t=y when you're ready.",
         ));
     }
@@ -232,12 +227,7 @@ async fn read(mail: &Arc<Mail>, name: &str, record: &str, found: &mut Vec<Findin
     if tags.rua.is_empty() {
         let message = "No rua= address, so nobody receives DMARC aggregate reports.";
         let hint = "Add rua=mailto:<an address you read>.";
-        found.push(finding(
-            Severity::Info,
-            "dmarc_no_rua",
-            message.into(),
-            hint,
-        ));
+        found.push(finding(Severity::Info, "dmarc_no_rua", message, hint));
     }
     let policy_domain = found_at.trim_start_matches("_dmarc.").to_string();
     let rua_authorized = authorize(mail, &policy_domain, &tags.rua, found).await;

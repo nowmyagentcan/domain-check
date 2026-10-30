@@ -216,12 +216,7 @@ pub async fn run(mail: Arc<Mail>, given: Vec<String>) -> (Dkim, Vec<Finding>) {
     } else if keys.is_empty() {
         let message =
             "No DKIM key under the 8 common selectors; this doesn't mean DKIM is missing.";
-        found.push(finding(
-            Severity::Info,
-            "dkim_not_found",
-            message.into(),
-            hint,
-        ));
+        found.push(finding(Severity::Info, "dkim_not_found", message, hint));
     }
     let dkim = Dkim {
         selectors,

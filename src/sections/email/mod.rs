@@ -90,7 +90,12 @@ pub fn got(a: &Answer, t: RecordType) -> Found {
     }
 }
 
-pub fn finding(severity: Severity, code: &'static str, message: String, hint: &str) -> Finding {
+pub fn finding(
+    severity: Severity,
+    code: &'static str,
+    message: impl Into<String>,
+    hint: &str,
+) -> Finding {
     Finding::new(Check::Email, severity, code, message, hint)
 }
 

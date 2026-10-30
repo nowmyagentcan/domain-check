@@ -192,14 +192,14 @@ pub fn across(e: &Email, d: &str) -> Vec<Finding> {
         };
         let message = "No TLS-RPT record, so nobody hears about failed encrypted deliveries.";
         let hint = format!("Publish _smtp._tls.{d} TXT \"v=TLSRPTv1; rua=mailto:<you>\".");
-        found.push(finding(severity, "tls_rpt_none", message.into(), &hint));
+        found.push(finding(severity, "tls_rpt_none", message, &hint));
     }
     let Some(bimi) = &e.bimi else {
         return found;
     };
     if tag(&pairs(&bimi.record), "l").is_none_or(str::is_empty) {
         let message = "The BIMI record declines a logo (empty l=).";
-        found.push(finding(Severity::Info, "bimi_declined", message.into(), ""));
+        found.push(finding(Severity::Info, "bimi_declined", message, ""));
         return found;
     }
     let policy = match &e.dmarc {
@@ -233,12 +233,7 @@ pub fn across(e: &Email, d: &str) -> Vec<Finding> {
     }
     if bimi.certificate.is_none() {
         let message = "No mark certificate (a=); some mailbox providers show BIMI logos only with a VMC or CMC.";
-        found.push(finding(
-            Severity::Info,
-            "bimi_no_certificate",
-            message.into(),
-            "",
-        ));
+        found.push(finding(Severity::Info, "bimi_no_certificate", message, ""));
     }
     found
 }

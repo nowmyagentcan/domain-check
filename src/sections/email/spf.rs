@@ -438,7 +438,7 @@ async fn read(mail: Arc<Mail>) -> Part<Spf> {
         found.push(finding(
             Severity::Info,
             "spf_sender_id",
-            message.into(),
+            message,
             "You can delete it.",
         ));
     }
@@ -506,19 +506,14 @@ async fn read(mail: Arc<Mail>) -> Part<Spf> {
         Some("?all") => {
             let message = "The SPF record ends in ?all, which says nothing about other senders.";
             let hint = "Use -all or ~all once every sender is listed.";
-            found.push(finding(
-                Severity::Warning,
-                "spf_neutral_all",
-                message.into(),
-                hint,
-            ));
+            found.push(finding(Severity::Warning, "spf_neutral_all", message, hint));
         }
         None if redirect.is_none() => {
             let message = "The SPF record has no \"all\" term or redirect, so mail from other senders gets \"neutral\".";
             found.push(finding(
                 Severity::Warning,
                 "spf_no_all",
-                message.into(),
+                message,
                 "End it with -all or ~all.",
             ));
         }
@@ -527,7 +522,7 @@ async fn read(mail: Arc<Mail>) -> Part<Spf> {
     if ptr {
         let message = "The SPF record uses ptr, which RFC 7208 §5.5 says not to use.";
         let hint = "Replace it with ip4:, ip6: or a: terms.";
-        found.push(finding(Severity::Warning, "spf_ptr", message.into(), hint));
+        found.push(finding(Severity::Warning, "spf_ptr", message, hint));
     }
     if lookups > LIMIT {
         let n = match capped {
