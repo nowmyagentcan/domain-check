@@ -345,81 +345,11 @@ addEventListener("keydown", e => {
 });
 
 async function api(body) {
-  await new Promise(ok => setTimeout(ok, 1200));
-  return sample(body);
-}
-
-// Sample answers until the page talks to the server: one report in the CLI's --json shape, or an input error.
-function sample(body) {
-  const d = body.domain.trim().toLowerCase().replace(/^[a-z]+:\/\//, "").replace(/^.*@/, "").replace(/[:/].*$/, "").replace(/\.$/, "");
-  if (!d) return { error: { code: "empty", message: "Empty input.", hint: "Pass a domain, e.g. example.com." } };
-  if (/(^|\.)(localhost|test|invalid|example|local|onion|alt|internal)$|(^|\.)home\.arpa$/.test(d))
-    return { error: { code: "special_use", message: `${d} is a special-use name (RFC 6761); it never resolves on the public internet.`, hint: "Use domain-check lookup to ask your own resolver about it." } };
-  const at = new Date().toISOString().slice(0, 19) + "Z", f = (severity, check, code, message, hint = null) => ({ code, severity, check, message, hint });
-  const findings = [
-    f("error", "email", "mta_sts_mx_not_covered", "MX host mx2.example.net doesn't match the MTA-STS policy's mx lines, so senders in enforce mode will refuse it.", 'Add "mx: mx2.example.net" (or a matching *. pattern) to the policy and change its id.'),
-    f("error", "email", "spf_include_missing", "include:_spf.old-mailer.example.org points to _spf.old-mailer.example.org, which has no SPF record (NXDOMAIN); that is a permanent error.", "Fix the name or remove the term."),
-    f("warning", "propagation", "ns_timeout", "Nameserver ns2.example.net (2001:db8::53) didn't answer within 4 s.", "It may be down, or your network may block DNS to outside servers."),
-    f("warning", "tls", "cert_expiring", "The certificate expires in 12 days (2026-11-11); renewal is due.", "Check that automatic renewal is running."),
-    f("warning", "http", "csp_missing", "No Content-Security-Policy header.", "Start with \"default-src 'self'; object-src 'none'; frame-ancestors 'none'\" and adjust."),
-    f("info", "dns", "no_caa", `No CAA record: any certificate authority may issue certificates for ${d}.`, 'Add one naming your CA, e.g. 0 issue "letsencrypt.org".'),
-    f("info", "propagation", "propagation_stale", `Quad9 (9.9.9.10) still answers A 192.0.2.10 for ${d}; the nameservers say 192.0.2.20. Its copy expires within 1840 s.`),
-    f("info", "email", "dmarc_historic_tag", "pct= is no longer part of DMARC (RFC 9989); receivers ignore it.", "Use t=y for a test phase instead."),
-    f("info", "http", "referrer_policy_missing", "No Referrer-Policy header.", 'Add "Referrer-Policy: strict-origin-when-cross-origin" or stricter.'),
-  ];
-  const rr = (value, ttl = 3600) => ({ value, ttl }), ans = (values, ttl = 3600, agrees) => ({ rcode: "NOERROR", values, ttl, ...(agrees === undefined ? {} : { agrees }) });
-  const auth = { A: ans(["192.0.2.20"]), AAAA: ans(["2001:db8::20"]), MX: ans(["10 mx1.example.net", "20 mx2.example.net"]), TXT: ans([`v=spf1 include:_spf.example.net include:_spf.old-mailer.example.org ip4:192.0.2.0/24 ~all`]) };
-  const agree = (left = {}) => Object.fromEntries(Object.entries(auth).map(([t, a]) => [t, { ...a, ttl: left[t] ?? a.ttl, agrees: true }]));
-  const sel = list => list.length ? list : ["default", "google", "selector1", "selector2", "k1", "s1", "s2", "dkim"];
-  const report = {
-    input: body.domain, domain: d, unicode: d, checked_at: at, error: null, counts: { errors: 2, warnings: 3, info: 4 }, findings,
-    dns: { status: "ok", reason: null, resolver: body.dns_server || "system (192.168.1.1)", exists: true, zone: d,
-      records: { A: [rr("192.0.2.20")], AAAA: [rr("2001:db8::20")], CNAME: [], MX: [rr("10 mx1.example.net"), rr("20 mx2.example.net")],
-        NS: [rr("ns1.example.net", 86400), rr("ns2.example.net", 86400)], TXT: [rr(auth.TXT.values[0], 300), rr("google-site-verification=4kT9mWq2xZpL7", 300)],
-        CAA: [], SOA: [rr(`ns1.example.net hostmaster.${d} 2026103001 7200 3600 1209600 3600`)], HTTPS: [],
-        DS: [rr("370 13 2 BE74359954660069D5C63D200C39F5603827D7DD02B56F120EE9F3A86764247C", 86400)], DNSKEY: [rr("257 3 13 mdsswUyr3DPW132mOi8V9xESWE8jTo0dxCjjnopKl+GqJxpVXckHAeF+KkxLbxILfDLUT0rAK9iUzy1L53eKGQ==")] },
-      errors: {}, cname_chain: [], caa: null,
-      dnssec: { signed: true, ds: [{ key_tag: 370, algorithm: 13, algorithm_name: "ECDSAP256SHA256", digest_type: 2 }], dnskey_algorithms: [13], validated_by: ["8.8.8.8", "1.1.1.1", "9.9.9.10"], bogus: false } },
-    propagation: { status: "ok", reason: null, types: ["A", "AAAA", "MX", "TXT"], zone: d, consistent: false, varies: [], wildcard: false, rewrites_nxdomain: false,
-      authoritative: [
-        { server: "ns1.example.net", address: "192.0.2.53", status: "ok", soa_serial: 2026103001, answers: auth },
-        { server: "ns2.example.net", address: "198.51.100.53", status: "ok", soa_serial: 2026103001, answers: auth },
-        { server: "ns2.example.net", address: "2001:db8::53", status: "timeout", soa_serial: null, answers: {} }],
-      resolvers: [
-        { name: "Google", address: "8.8.8.8", status: "ok", answers: agree({ A: 2214, MX: 3480 }) },
-        { name: "Cloudflare", address: "1.1.1.1", status: "ok", answers: agree({ A: 312 }) },
-        { name: "Quad9", address: "9.9.9.10", status: "ok", answers: { ...agree(), A: ans(["192.0.2.10"], 1840, false) } },
-        { name: "System", address: "192.168.1.1", status: "ok", answers: agree({ A: 3599 }) }] },
-    email: { status: "ok", reason: null,
-      mx: { kind: "mx", hosts: [{ preference: 10, host: "mx1.example.net", addresses: ["192.0.2.25"], cname: false, error: null }, { preference: 20, host: "mx2.example.net", addresses: ["198.51.100.25"], cname: false, error: null }] },
-      spf: { record: auth.TXT.values[0], lookups: 4, lookups_capped: false, void_lookups: 1, all: "~all", redirect: null, result: null, tree: [
-        { term: "include:_spf.example.net", lookups: 1, record: "v=spf1 include:_netblocks1.example.net include:_netblocks2.example.net ~all", error: null, children: [
-          { term: "include:_netblocks1.example.net", lookups: 1, record: "v=spf1 ip4:203.0.113.0/24 ~all", error: null, children: [] },
-          { term: "include:_netblocks2.example.net", lookups: 1, record: "v=spf1 ip6:2001:db8:25::/48 ~all", error: null, children: [] }] },
-        { term: "include:_spf.old-mailer.example.org", lookups: 1, record: null, error: "NXDOMAIN", children: [] }] },
-      dmarc: { record: `v=DMARC1; p=quarantine; pct=50; rua=mailto:dmarc@${d}`, found_at: `_dmarc.${d}`, inherited: false,
-        tags: { p: "quarantine", sp: null, np: null, adkim: null, aspf: null, t: null, psd: null, fo: null, rua: [`mailto:dmarc@${d}`], ruf: [] },
-        historic_tags: ["pct"], rua_authorized: [{ uri: `mailto:dmarc@${d}`, authorized: null }] },
-      dkim: { selectors: sel(body.dkim_selectors || []), given: !!body.dkim_selectors, keys: [{ selector: "google", name: `google._domainkey.${d}`,
-        record: "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr4nK2", key_type: "rsa", bits: 2048, revoked: false, testing: false, error: null }] },
-      mta_sts: { record: "v=STSv1; id=20261030", id: "20261030", policy: { url: `https://mta-sts.${d}/.well-known/mta-sts.txt`, mode: "enforce", mx: ["mx1.example.net"], max_age: 604800, error: null } },
-      tls_rpt: { record: `v=TLSRPTv1; rua=mailto:tlsrpt@${d}`, rua: [`mailto:tlsrpt@${d}`] }, bimi: null },
-    rdap: { status: "rate_limited", reason: "rdap.example.net limits lookups and asked us to wait 42 s.", retry_after: 42 },
-    tls: { status: "ok", reason: null, address: "192.0.2.20", port: 443, protocol: "TLSv1.3", cipher: "TLS13_AES_128_GCM_SHA256", alpn: "h2",
-      trusted: true, trust_error: null, trust_detail: null, names_match: true, not_before: "2026-08-13T00:00:00Z", not_after: "2026-11-11T23:59:59Z", days_left: 12, lifetime_days: 90,
-      chain: [
-        { subject: `CN=${d}`, issuer: "CN=Example Issuing CA R2, O=Example Trust", serial: "04a1f3c2", not_before: "2026-08-13T00:00:00Z", not_after: "2026-11-11T23:59:59Z", sans: [d, `www.${d}`], key: "EC P-256", signature: "ecdsa-with-SHA384", self_signed: false, ca: false },
-        { subject: "CN=Example Issuing CA R2, O=Example Trust", issuer: "CN=Example Root CA X1, O=Example Trust", serial: "5c11", not_before: "2024-03-13T00:00:00Z", not_after: "2027-03-12T23:59:59Z", sans: [], key: "EC P-384", signature: "sha384WithRSAEncryption", self_signed: false, ca: true },
-        { subject: "CN=Example Root CA X1, O=Example Trust", issuer: "CN=Example Root CA X1, O=Example Trust", serial: "01", not_before: "2015-06-04T11:04:38Z", not_after: "2035-06-04T11:04:38Z", sans: [], key: "RSA 4096", signature: "sha256WithRSAEncryption", self_signed: true, ca: true }] },
-    http: { status: "ok", reason: null,
-      http: { start: `http://${d}/`, hops: [{ url: `http://${d}/`, status: 301, location: `https://${d}/`, hsts: null }, { url: `https://${d}/`, status: 200, location: null, hsts: "max-age=31536000; includeSubDomains" }], final: `https://${d}/`, final_status: 200, error: null },
-      https: { start: `https://${d}/`, hops: [{ url: `https://${d}/`, status: 200, location: null, hsts: "max-age=31536000; includeSubDomains" }], final: `https://${d}/`, final_status: 200, error: null },
-      headers: { "strict-transport-security": "max-age=31536000; includeSubDomains", "content-security-policy": null, "x-content-type-options": "nosniff", "x-frame-options": "SAMEORIGIN",
-        "referrer-policy": null, "permissions-policy": "camera=(), microphone=()", "cross-origin-opener-policy": "same-origin", "cross-origin-resource-policy": null,
-        "x-xss-protection": null, "expect-ct": null, "public-key-pins": null, "feature-policy": null, server: "nginx", "x-powered-by": null, "x-aspnet-version": null, "x-aspnetmvc-version": null } },
-  };
-  for (const k of Object.keys(SECTIONS)) if (body.checks && !body.checks.includes(k)) report[k] = { status: "skipped", reason: "not requested" };
-  return { reports: [report], summary: { domains: 1, errors: 2, warnings: 3, info: 4, unavailable: 1 }, data: { version: "0.1.0", rdap_bootstrap: "2026-10-28T22:00:04Z" } };
+  const json = JSON.stringify(body);
+  // The server cuts off a larger request, which would read as no server at all.
+  if (new Blob([json]).size > 64 * 1024) return { error: { code: "too_large", message: "The request is larger than 64 KB.", hint: "Check one domain at a time." } };
+  const r = await fetch("/api", { method: "POST", headers: { "content-type": "application/json" }, body: json });
+  return r.json();
 }
 </script>
 </body>

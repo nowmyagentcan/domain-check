@@ -204,7 +204,7 @@ pub fn failure(error: &Error) -> String {
 }
 
 /// One call at a time: checks are paced for the services they ask (spec §6).
-static ONE: Mutex<()> = Mutex::new(());
+pub static ONE: Mutex<()> = Mutex::new(());
 
 #[derive(Clone)]
 struct Server {

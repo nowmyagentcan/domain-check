@@ -17,6 +17,7 @@ pub mod sections {
     pub mod web;
 }
 pub mod text;
+pub mod ui;
 
 /// The `publication` stamp of the bundled IANA RDAP bootstrap file, `data/rdap-dns.json`.
 pub const RDAP_BOOTSTRAP: &str = "2026-10-28T22:00:04Z";

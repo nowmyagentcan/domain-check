@@ -10,7 +10,7 @@ use domain_check::mcp::{self, Defaults};
 use domain_check::report::Output;
 use domain_check::sections::email::dkim;
 use domain_check::sections::rdap;
-use domain_check::{Error, Ports, input, interactive, lookup, net, text};
+use domain_check::{Error, Ports, input, interactive, lookup, net, text, ui};
 
 // clap prints the name itself.
 static VERSION: LazyLock<String> =
@@ -67,8 +67,22 @@ enum Command {
     /// Run one DNS query (dig-like); an IP address gives its PTR
     #[command(after_help = AFTER_HELP)]
     Lookup(LookupArgs),
+    /// Open the local web page
+    Ui(UiArgs),
     /// Run the MCP server on stdio
     Mcp(ServerArgs),
+}
+
+#[derive(clap::Args)]
+struct UiArgs {
+    /// port on 127.0.0.1; 0 picks a free one
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    port: u16,
+    /// don't open the browser
+    #[arg(long)]
+    no_open: bool,
+    #[command(flatten)]
+    server: ServerArgs,
 }
 
 /// What every check a server runs starts from.
@@ -168,6 +182,15 @@ struct LookupArgs {
 struct Done {
     out: String,
     code: u8,
+}
+
+impl Done {
+    fn nothing() -> Done {
+        Done {
+            out: String::new(),
+            code: 0,
+        }
+    }
 }
 
 fn run_lookup(args: LookupArgs) -> Result<Done, Error> {
@@ -300,10 +323,7 @@ fn run_interactive(args: CheckArgs) -> Result<Done, Error> {
     interactive::run(rx, &mut options, &mut say, &mut |domains, o| {
         Ok(text::output(&checked(domains, o, false)?))
     });
-    Ok(Done {
-        out: String::new(),
-        code: 0,
-    })
+    Ok(Done::nothing())
 }
 
 /// The progress line on a terminal's stderr, redrawn in place.
@@ -378,6 +398,7 @@ fn cli() -> clap::Command {
         .mut_arg("version", |a| a.help("print version"))
         .mut_subcommand("check", lower)
         .mut_subcommand("lookup", lower)
+        .mut_subcommand("ui", lower)
         .mut_subcommand("mcp", lower)
 }
 
@@ -392,10 +413,15 @@ fn main() -> ExitCode {
     let done = match cli.command {
         Some(Command::Check(args)) => run_check(args),
         Some(Command::Lookup(args)) => run_lookup(args),
-        Some(Command::Mcp(args)) => args.defaults().and_then(mcp::serve).map(|()| Done {
-            out: String::new(),
-            code: 0,
-        }),
+        Some(Command::Ui(args)) => args
+            .server
+            .defaults()
+            .and_then(|d| ui::serve(args.port, !args.no_open, d))
+            .map(|()| Done::nothing()),
+        Some(Command::Mcp(args)) => args
+            .defaults()
+            .and_then(mcp::serve)
+            .map(|()| Done::nothing()),
         // No arguments at all, in a terminal: the interactive session.
         None if std::env::args_os().len() == 1
             && io::stdin().is_terminal()
