@@ -600,7 +600,8 @@ fn runs_with_stderr_closed() {
 }
 
 /// The page's own script, run in node with every element a stub that takes anything: for each
-/// report on stdin, what render() and the Copy text throw, or nothing.
+/// report on stdin, what render() and the Copy text throw, or section lines that show a missing
+/// value, or nothing.
 const RENDER: &str = r#"
 const fs = require("fs"), vm = require("vm");
 const html = fs.readFileSync(process.argv[1], "utf8");
@@ -613,7 +614,11 @@ const page = { document: stub(), navigator: stub(), URL: stub(), Blob: function 
   innerHeight: 800, setTimeout, clearTimeout, setInterval, clearInterval };
 const [render, textReport] = vm.runInNewContext(script + "\n;[render, textReport]", page);
 for (const res of JSON.parse(fs.readFileSync(0, "utf8"))) {
-  try { render(res); textReport(res.reports[0]); } catch (e) { console.log(`${res.reports[0].input}: ${e.message}`); }
+  try {
+    render(res);
+    const lines = textReport(res.reports[0]).split("\n\n")[1];
+    if (!res.reports[0].error && /\b(null|undefined|NaN)\b/.test(lines)) console.log(`${res.reports[0].input}: ${lines}`);
+  } catch (e) { console.log(`${res.reports[0].input}: ${e.message}`); }
 }
 "#;
 
@@ -671,11 +676,11 @@ fn the_page_script_renders_reports() {
 }
 
 #[test]
-#[ignore = "known bug: DC04"]
 fn the_page_script_renders_reports_with_failed_parts() {
-    // https fails at the first hop (no headers), and an MTA-STS record with no valid id (no policy).
+    // https fails at the first hop (no headers), nothing listens on 443, and an MTA-STS record with no valid id (no policy).
     let checks: &[(&str, &[&str])] = &[
         ("selfsigned.example.com", &["-c", "dns,email,tls,http"]),
+        ("closed.example.com", &["-c", "dns,email,tls,http"]),
         ("stsnoid.example.net", &["-c", "email"]),
     ];
     assert_eq!(page_errors(checks), "");

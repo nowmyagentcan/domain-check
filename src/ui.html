@@ -219,18 +219,19 @@ const LINES = {
     return [`SPF ${s.spf ? `${s.spf.all || "no all"}, ${s.spf.lookups}/10 lookups` : "none"}`,
       `DMARC ${s.dmarc ? `p=${s.dmarc.tags.p}` : "none"}`,
       `DKIM ${k.length ? k.map(k => `${k.selector} ${k.key_type === "ed25519" ? "Ed25519" : `RSA ${k.bits}`}`).join(", ") : noDkim(s.dkim)}`,
-      `MTA-STS ${s.mta_sts ? s.mta_sts.policy.mode || "policy unavailable" : "none"}`,
+      `MTA-STS ${s.mta_sts ? s.mta_sts.policy?.mode || "policy unavailable" : "none"}`,
       `TLS-RPT ${s.tls_rpt ? "yes" : "none"}`,
       `BIMI ${s.bimi ? (s.bimi.logo ? "logo" : "declined") : "none"}`].join(" · ");
   },
   rdap: s => !s.found ? "no registration record" : [s.registrar && `${s.registrar.name}${s.registrar.iana_id ? ` (${s.registrar.iana_id})` : ""}`,
     `created ${date(s.created)}`, s.expires && `expires ${date(s.expires)}`, s.domain_status.join(", ")].filter(Boolean).join(" · "),
-  tls: s => [cn(s.chain[0]?.subject), cn(s.chain[0]?.issuer), `until ${date(s.not_after)} (${plural(s.days_left, "day")})`,
+  tls: s => !s.protocol ? (s.chain.length ? "TLS handshake failed" : `no TLS connection to ${s.address}`) : [cn(s.chain[0]?.subject), cn(s.chain[0]?.issuer), `until ${date(s.not_after)} (${plural(s.days_left, "day")})`,
     s.protocol?.replace("TLSv", "TLS "), s.trusted ? "trusted" : `not trusted: ${(s.trust_error || "").replace(/_/g, " ")}`].filter(Boolean).join(" · "),
   http: s => {
     const ch = c => c.error ? `${c.start.split(":")[0]}: ${c.error}` : c.start.split(":")[0] + c.hops.map(x => ` → ${x.status}${x.location ? ` ${x.location}` : ""}`).join("");
+    const has = k => s.headers[k] ? "yes" : "no";
     return [ch(s.http), s.https.hops.length > 1 || s.https.error ? ch(s.https) : null,
-      `HSTS ${s.headers["strict-transport-security"] ? "yes" : "no"}`, `CSP ${s.headers["content-security-policy"] ? "yes" : "no"}`].filter(Boolean).join(" · ");
+      s.headers && `HSTS ${has("strict-transport-security")}`, s.headers && `CSP ${has("content-security-policy")}`].filter(Boolean).join(" · ");
   },
 };
 const dnssec = d => d.bogus ? "bogus" : !d.signed ? "unsigned" : d.validated_by.length ? "signed, validated" : "signed, not validated";
@@ -263,22 +264,23 @@ const BODIES = {
     ["SPF", s.spf ? h`${mono(s.spf.record)}<small>${s.spf.lookups}/10 DNS lookups, ${s.spf.void_lookups} void${s.spf.result ? h`, ${s.spf.result.ip}: ${s.spf.result.result}` : ""}</small>${s.spf.tree.length ? spfTree(s.spf.tree) : ""}` : "none"],
     ["DMARC", s.dmarc ? h`${mono(s.dmarc.record)}<small>at ${s.dmarc.found_at}${s.dmarc.inherited ? " (inherited)" : ""}${s.dmarc.historic_tags.length ? h`; no longer used: ${s.dmarc.historic_tags.join(", ")}` : ""}</small>` : "none"],
     ["DKIM", s.dkim.keys.length ? s.dkim.keys.map(k => h`<span><span class="mono">${k.name}</span> <small>${k.revoked ? "revoked" : k.key_type === "ed25519" ? "Ed25519" : `RSA ${k.bits} bits`}${k.testing ? ", testing" : ""}</small></span>`) : noDkim(s.dkim)],
-    ["MTA-STS", s.mta_sts ? h`${mono(s.mta_sts.record)}<small>${s.mta_sts.policy.error || `mode ${s.mta_sts.policy.mode}, mx ${s.mta_sts.policy.mx.join(", ")}, max_age ${s.mta_sts.policy.max_age}`}</small>` : "none"],
+    ["MTA-STS", s.mta_sts ? h`${mono(s.mta_sts.record)}<small>${policy(s.mta_sts.policy)}</small>` : "none"],
     ["TLS-RPT", s.tls_rpt ? mono(s.tls_rpt.record) : "none"],
     ["BIMI", s.bimi ? mono(s.bimi.record) : "none"]]),
   rdap: s => dl([["Registrar", s.registrar?.name], ["Created", date(s.created)], ["Expires", s.expires && date(s.expires)], ["Updated", s.updated && date(s.updated)],
     ["Status", s.domain_status.join(", ")], ["Nameservers", s.nameservers.join(", ")], ["DNSSEC", s.dnssec_delegation == null ? null : s.dnssec_delegation ? "delegation signed" : "not signed"],
     ["Server", h`<span class="mono">${s.server}</span><small>bootstrap ${s.bootstrap}</small>`]]),
-  tls: s => h`${dl([["Connection", `${s.address} port ${s.port}, ${s.protocol?.replace("TLSv", "TLS ")}, ${s.cipher}${s.alpn ? `, ${s.alpn}` : ""}`],
-    ["Trust", s.trusted ? "trusted by this computer" : h`<span class="error">${(s.trust_error || "").replace(/_/g, " ")}</span>${s.trust_detail ? h`<small>${s.trust_detail}</small>` : ""}`],
-    ["Valid", `${date(s.not_before)} to ${date(s.not_after)}, ${plural(s.days_left, "day")} left of ${s.lifetime_days}`]])}
+  tls: s => h`${dl([["Connection", s.protocol ? `${s.address} port ${s.port}, ${s.protocol.replace("TLSv", "TLS ")}, ${s.cipher}${s.alpn ? `, ${s.alpn}` : ""}` : LINES.tls(s)],
+    ["Trust", !s.protocol ? null : s.trusted ? "trusted by this computer" : h`<span class="error">${(s.trust_error || "").replace(/_/g, " ")}</span>${s.trust_detail ? h`<small>${s.trust_detail}</small>` : ""}`],
+    ["Valid", s.not_after && `${date(s.not_before)} to ${date(s.not_after)}, ${plural(s.days_left, "day")} left of ${s.lifetime_days}`]])}
     <ol class="chain">${s.chain.map(c => h`<li><span>${cn(c.subject)}</span><small>issued by ${cn(c.issuer)}; ${c.key}, ${c.signature}; until ${date(c.not_after)}${c.self_signed ? "; self-signed" : ""}</small>${c.sans.length ? h`<small class="mono">${c.sans.join(", ")}</small>` : ""}</li>`)}</ol>`,
   http: s => h`${dl([["From http", hops(s.http)], ["From https", hops(s.https)]])}
-    <div class="wide"><table><thead><tr><th>Header</th><th>Value</th></tr></thead><tbody>
-    ${Object.entries(s.headers).filter(([k, v]) => v != null || !QUIET.test(k)).map(([k, v]) => h`<tr><td>${k}</td><td class="${v == null ? "muted" : "mono"}">${v ?? "missing"}</td></tr>`)}</tbody></table></div>`,
+    ${s.headers ? h`<div class="wide"><table><thead><tr><th>Header</th><th>Value</th></tr></thead><tbody>
+    ${Object.entries(s.headers).filter(([k, v]) => v != null || !QUIET.test(k)).map(([k, v]) => h`<tr><td>${k}</td><td class="${v == null ? "muted" : "mono"}">${v ?? "missing"}</td></tr>`)}</tbody></table></div>` : ""}`,
 };
 // Obsolete and software-version headers are listed only when the server sends them.
 const QUIET = /^(x-xss|expect-ct|public-key|feature-policy|server|x-powered|x-aspnet)/;
+const policy = p => !p ? "policy not fetched" : p.error || `mode ${p.mode}, mx ${p.mx.join(", ")}, max_age ${p.max_age}`;
 const hops = c => c.error ? h`<span class="error">${c.error}</span>` : h`<ol class="chain">${c.hops.map(x => h`<li class="mono">${x.status} ${x.url}</li>`)}</ol>`;
 
 function render(res) {
