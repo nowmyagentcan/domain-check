@@ -280,7 +280,17 @@ fn email(e: &Email) -> String {
         ),
         None => "SPF none".into(),
     };
-    [spf].join(" · ")
+    let dmarc = match &e.dmarc {
+        Some(d) => format!("DMARC p={}", d.tags.p.as_deref().unwrap_or("?")),
+        None => "DMARC none".into(),
+    };
+    let mut parts = [spf, dmarc];
+    for (part, name) in parts.iter_mut().zip(["spf", "dmarc"]) {
+        if let Some(why) = e.errors.get(name) {
+            *part = format!("{} {why}", &part[..part.find(' ').unwrap_or(0)]);
+        }
+    }
+    parts.join(" · ")
 }
 
 #[cfg(test)]

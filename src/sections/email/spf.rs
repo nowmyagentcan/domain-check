@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use super::{Found, Mail, finding};
+use super::{Found, Mail, Part, finding};
 use crate::dns::RecordType;
 use crate::report::{Finding, Severity};
 
@@ -407,26 +407,27 @@ fn target(spec: &str, v: &Vars) -> Option<String> {
 }
 
 /// The record and its walk, plus the verdict for `ip` when one is given.
-pub async fn run(mail: Arc<Mail>, ip: Option<IpAddr>) -> (Option<Spf>, Vec<Finding>) {
+/// `Err` when the domain's TXT lookup failed.
+pub async fn run(mail: Arc<Mail>, ip: Option<IpAddr>) -> Part<Spf> {
     let (mut spf, mut found) = read(Arc::clone(&mail)).await;
     if let Some(ip) = ip {
         let verdict = evaluate(mail, ip).await;
         found.push(verdict_finding(&verdict));
-        if let Some(spf) = &mut spf {
+        if let Ok(Some(spf)) = &mut spf {
             spf.result = Some(verdict);
         }
     }
     (spf, found)
 }
 
-async fn read(mail: Arc<Mail>) -> (Option<Spf>, Vec<Finding>) {
+async fn read(mail: Arc<Mail>) -> Part<Spf> {
     let d = mail.domain.clone();
     let mut found = Vec::new();
     let txts = match mail.values(&d, RecordType::TXT).await {
         Ok(txts) => txts.unwrap_or_default(),
         Err(why) => {
             found.push(lookup_failed(&d, &why));
-            return (None, found);
+            return (Err(why), found);
         }
     };
     if txts
@@ -446,7 +447,7 @@ async fn read(mail: Arc<Mail>) -> (Option<Spf>, Vec<Finding>) {
         let message = format!("No SPF record for {d}.");
         let hint = "Publish one, e.g. \"v=spf1 include:<your mail provider> -all\", or \"v=spf1 -all\" if it sends no mail.";
         found.push(finding(Severity::Warning, "spf_none", message, hint));
-        return (None, found);
+        return (Ok(None), found);
     };
     if records.len() > 1 {
         found.push(multiple(&d, records.len()));
@@ -565,7 +566,7 @@ async fn read(mail: Arc<Mail>) -> (Option<Spf>, Vec<Finding>) {
         tree,
         result: None,
     };
-    (Some(spf), unique)
+    (Ok(Some(spf)), unique)
 }
 
 /// `check_host()` (§4) for mail from `ip` with sender `postmaster@<domain>`.

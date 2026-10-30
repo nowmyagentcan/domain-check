@@ -273,7 +273,7 @@ fn deadline(budget: Duration) -> (Duration, String) {
 enum Part {
     Dns(Section<Dns>),
     Propagation(Section<Propagation>),
-    Email(Section<Email>),
+    Email(Box<Section<Email>>),
     Down(Status, String),
 }
 
@@ -321,7 +321,7 @@ fn checked(d: &Domain, resolver: Arc<Resolver>, o: &Options, progress: &mut Prog
         match outcome.part {
             Part::Dns(s) => sections.dns = Some(s),
             Part::Propagation(s) => sections.propagation = Some(s),
-            Part::Email(s) => sections.email = Some(s),
+            Part::Email(s) => sections.email = Some(*s),
             Part::Down(status, why) => sections.not(outcome.check, status, &why),
         }
         findings.extend(outcome.findings);
@@ -368,7 +368,7 @@ fn section(check: Check, cx: &Cx, facts: &Facts) -> Outcome {
         }
         Check::Email => {
             let (s, f) = rt.block_on(sections::email::run(cx, facts));
-            (Part::Email(s), f)
+            (Part::Email(Box::new(s)), f)
         }
         _ => (
             Part::Down(Status::Skipped, "not requested".into()),

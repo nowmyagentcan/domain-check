@@ -8,8 +8,9 @@ use serde::Serialize;
 
 use crate::check::{Cx, Facts};
 use crate::dns::{self, Answer, Failure, RecordType, Resolver, ResponseCode};
-use crate::report::{Check, Finding, Section, Severity, Status};
+use crate::report::{Check, Finding, Keyed, Section, Severity, Status};
 
+pub mod dmarc;
 pub mod spf;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -17,6 +18,9 @@ pub struct Email {
     pub mx: Mx,
     /// `None` when the domain has no SPF record.
     pub spf: Option<spf::Spf>,
+    pub dmarc: Option<dmarc::Dmarc>,
+    /// The parts whose lookup failed (`spf`, `dmarc`, …) and why: they show as `null`.
+    pub errors: Keyed<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -100,11 +104,38 @@ pub async fn run(cx: &Cx, facts: &Facts) -> (Section<Email>, Vec<Finding>) {
         until: cx.until(Check::Email).into(),
     });
     let spf = tokio::spawn(spf::run(Arc::clone(&mail), cx.spf_ip));
-    let mut found = Vec::new();
-    let mx = mx(&mail, facts, &mut found).await;
-    let (spf, more) = dns::wait(spf).await;
-    found.extend(more);
-    (Section::ok(Email { mx, spf }), found)
+    let dmarc = tokio::spawn(dmarc::run(Arc::clone(&mail)));
+    let mut g = Gather::default();
+    let mx = mx(&mail, facts, &mut g.found).await;
+    let spf = g.take("spf", dns::wait(spf).await);
+    let dmarc = g.take("dmarc", dns::wait(dmarc).await);
+    let email = Email {
+        mx,
+        spf,
+        dmarc,
+        errors: g.errors,
+    };
+    (Section::ok(email), g.found)
+}
+
+/// What a part found, or why its lookup failed; and its findings.
+pub type Part<T> = (Result<Option<T>, String>, Vec<Finding>);
+
+/// Every part's findings, and the parts that failed.
+#[derive(Default)]
+struct Gather {
+    found: Vec<Finding>,
+    errors: Keyed<String>,
+}
+
+impl Gather {
+    fn take<T>(&mut self, name: &str, (got, found): Part<T>) -> Option<T> {
+        self.found.extend(found);
+        got.unwrap_or_else(|why| {
+            self.errors.0.push((name.to_string(), why));
+            None
+        })
+    }
 }
 
 /// The MX hosts and their addresses; a domain without MX records gets mail at its own

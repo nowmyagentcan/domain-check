@@ -673,3 +673,252 @@ fn spf_ip_must_be_an_address() {
         "✗ --spf-ip mail.example.com isn't an IP address.\n  Pass the sending server's address, e.g. --spf-ip 192.0.2.10.\n"
     );
 }
+
+/// The DMARC names the stub was asked for, in order.
+fn dmarc_queries(stub: &DnsStub) -> Vec<String> {
+    let asked = stub.queries().into_iter().map(|q| q.name);
+    asked.filter(|n| n.starts_with("_dmarc.")).collect()
+}
+
+#[test]
+fn dmarc_is_found_at_the_domain_or_up_the_tree() {
+    let walks = [
+        (
+            "three.example.org",
+            vec!["three.example.org", "example.org", "org"],
+        ),
+        (
+            "a.b.c.d.e.f.example.org",
+            vec![
+                "a.b.c.d.e.f.example.org",
+                "b.c.d.e.f.example.org",
+                "c.d.e.f.example.org",
+                "d.e.f.example.org",
+                "e.f.example.org",
+                "f.example.org",
+                "example.org",
+                "org",
+            ],
+        ),
+        (
+            "a.b.c.d.e.f.g.h.i.example.org",
+            vec![
+                "a.b.c.d.e.f.g.h.i.example.org",
+                "e.f.g.h.i.example.org",
+                "f.g.h.i.example.org",
+                "g.h.i.example.org",
+                "h.i.example.org",
+                "i.example.org",
+                "example.org",
+                "org",
+            ],
+        ),
+        (
+            "a.b.c.d.e.f.g.h.i.example.net",
+            vec![
+                "a.b.c.d.e.f.g.h.i.example.net",
+                "e.f.g.h.i.example.net",
+                "f.g.h.i.example.net",
+                "g.h.i.example.net",
+                "h.i.example.net",
+                "i.example.net",
+                "example.net",
+            ],
+        ),
+    ];
+    for (domain, names) in walks {
+        let stub = DnsStub::new();
+        let (_, r) = email(&stub, domain, &[]);
+        let want: Vec<_> = names.iter().map(|n| format!("_dmarc.{n}")).collect();
+        assert_eq!(dmarc_queries(&stub), want, "{domain}");
+        let found = !r["email"]["dmarc"].is_null();
+        assert_eq!(found, domain.ends_with(".net"), "{domain}");
+    }
+    let stub = DnsStub::new();
+    let (code, r) = email(&stub, "three.example.org", &[]);
+    assert_eq!(code, 1);
+    assert_eq!(
+        finding(&r, "dmarc_none"),
+        (
+            "error",
+            "No DMARC record for three.example.org.",
+            &j!(
+                "Publish _dmarc.three.example.org TXT \"v=DMARC1; p=none; rua=mailto:<you>\", then tighten p."
+            )
+        )
+    );
+    let (_, r) = email(&stub, "a.b.c.d.e.f.g.h.i.example.net", &[]);
+    let dmarc = &r["email"]["dmarc"];
+    assert_eq!(
+        (&dmarc["found_at"], &dmarc["inherited"]),
+        (&j!("_dmarc.example.net"), &j!(true))
+    );
+    assert_eq!(
+        found(&r, "dmarc_"),
+        [
+            (
+                "dmarc_sp_none",
+                "warning",
+                "sp=none leaves subdomains unprotected while p=quarantine."
+            ),
+            (
+                "dmarc_inherited",
+                "info",
+                "No DMARC record at _dmarc.a.b.c.d.e.f.g.h.i.example.net; the policy at _dmarc.example.net applies."
+            ),
+        ]
+    );
+}
+
+#[test]
+fn dmarc_tags_report_addresses_and_their_authorisation() {
+    let stub = DnsStub::new();
+    let (_, r) = email(&stub, "dmarc.example.net", &[]);
+    let rua = [
+        "mailto:a@example.net",
+        "https://dmarc.example.net/r",
+        "mailto:b@example.org!10m",
+        "mailto:c@example.com",
+    ];
+    assert_eq!(
+        r["email"]["dmarc"],
+        j!({
+            "record": "v=DMARC1; p=none; t=y; pct=50; rf=afrf; ri=86400; adkim=x; fo=1:d; rua=mailto:a@example.net,https://dmarc.example.net/r,mailto:b@example.org!10m,mailto:c@example.com; ruf=mailto:f@dmarc.example.net",
+            "found_at": "_dmarc.dmarc.example.net",
+            "inherited": false,
+            "tags": { "p": "none", "sp": null, "np": null, "adkim": null, "aspf": null, "t": "y", "psd": null, "fo": "1:d", "rua": rua, "ruf": ["mailto:f@dmarc.example.net"] },
+            "historic_tags": ["pct", "rf", "ri"],
+            "rua_authorized": [
+                { "uri": rua[0], "authorized": null },
+                { "uri": rua[1], "authorized": null },
+                { "uri": rua[2], "authorized": true },
+                { "uri": rua[3], "authorized": false },
+            ]
+        })
+    );
+    assert_eq!(
+        found(&r, "dmarc_"),
+        [
+            (
+                "dmarc_syntax",
+                "error",
+                "The DMARC record at _dmarc.dmarc.example.net is invalid: adkim=x isn't valid."
+            ),
+            (
+                "dmarc_p_none",
+                "warning",
+                "The DMARC policy is p=none, so receivers take no action on mail that fails."
+            ),
+            (
+                "dmarc_rua_scheme",
+                "warning",
+                "rua= entry https://dmarc.example.net/r isn't a mailto: address."
+            ),
+            (
+                "dmarc_rua_unauthorized",
+                "warning",
+                "Reports to mailto:c@example.com won't be sent: example.com hasn't published dmarc.example.net._report._dmarc.example.com (RFC 9990 §4)."
+            ),
+            (
+                "dmarc_historic_tag",
+                "info",
+                "pct= is no longer part of DMARC (RFC 9989); receivers ignore it."
+            ),
+            (
+                "dmarc_historic_tag",
+                "info",
+                "rf= is no longer part of DMARC (RFC 9989); receivers ignore it."
+            ),
+            (
+                "dmarc_historic_tag",
+                "info",
+                "ri= is no longer part of DMARC (RFC 9989); receivers ignore it."
+            ),
+            (
+                "dmarc_testing",
+                "info",
+                "t=y: the DMARC policy is in test mode, so receivers may apply one step less (RFC 9989)."
+            ),
+        ]
+    );
+    let hints: Vec<_> = r["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "dmarc_historic_tag")
+        .map(|f| f["hint"].clone())
+        .collect();
+    assert_eq!(
+        hints,
+        [j!("Use t=y for a test phase instead."), j!(null), j!(null)]
+    );
+    let asked: Vec<_> = stub
+        .queries()
+        .into_iter()
+        .map(|q| q.name)
+        .filter(|n| n.contains("._report."))
+        .collect();
+    assert_eq!(
+        asked,
+        [
+            "dmarc.example.net._report._dmarc.example.org",
+            "dmarc.example.net._report._dmarc.example.com"
+        ]
+    );
+}
+
+#[test]
+fn broken_and_doubled_dmarc_records() {
+    let stub = DnsStub::new();
+    let (_, r) = email(&stub, "twodmarc.example.net", &[]);
+    assert_eq!(r["email"]["dmarc"]["found_at"], "_dmarc.example.net");
+    assert_eq!(
+        finding(&r, "dmarc_multiple"),
+        (
+            "error",
+            "_dmarc.twodmarc.example.net has 2 DMARC records, so receivers ignore all of them.",
+            &j!("Keep exactly one.")
+        )
+    );
+    let (_, r) = email(&stub, "baddmarc.example.net", &[]);
+    assert_eq!(r["email"]["dmarc"]["found_at"], "_dmarc.example.net");
+    assert_eq!(
+        finding(&r, "dmarc_syntax"),
+        (
+            "error",
+            "The DMARC record at _dmarc.baddmarc.example.net is invalid: it doesn't start with v=DMARC1.",
+            &j!("Fix it; e.g. \"v=DMARC1; p=quarantine; rua=mailto:<you>\".")
+        )
+    );
+    let (_, r) = email(&stub, "badp.example.net", &[]);
+    assert_eq!(r["email"]["dmarc"]["tags"]["p"], "none");
+    let codes: Vec<_> = found(&r, "dmarc_").iter().map(|f| f.2).collect();
+    assert_eq!(
+        codes,
+        [
+            "The DMARC record at _dmarc.badp.example.net is invalid: p=block isn't none, quarantine or reject.",
+            "The DMARC policy is p=none, so receivers take no action on mail that fails."
+        ]
+    );
+    let (_, r) = email(&stub, "nop.example.net", &[]);
+    assert_eq!(r["email"]["dmarc"]["tags"]["p"], j!(null));
+    assert_eq!(
+        found(&r, "dmarc_"),
+        [
+            (
+                "dmarc_syntax",
+                "error",
+                "The DMARC record at _dmarc.nop.example.net is invalid: p= is missing."
+            ),
+            (
+                "dmarc_no_rua",
+                "info",
+                "No rua= address, so nobody receives DMARC aggregate reports."
+            ),
+        ]
+    );
+    let (_, r) = email(&stub, "servfail.example.net", &[]);
+    assert_eq!(r["email"]["dmarc"], j!(null));
+    assert_eq!(r["email"]["errors"]["dmarc"], "SERVFAIL");
+    assert!(found(&r, "dmarc_").is_empty());
+}

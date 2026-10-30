@@ -284,6 +284,25 @@ pub const MAIL: &[(&str, RecordType, &str)] = {
         ("soft.example.net", TXT, "v=spf1 ip4:203.0.113.0/24 ~all"),
         ("ptr.example.net", TXT, "v=spf1 ptr:example.com exists:%{i}._ip.%{d} -all"),
         ("198.51.100.30._ip.ptr.example.net", A, "127.0.0.2"),
+        // DMARC
+        ("_dmarc.example.com", TXT, "v=DMARC1; p=reject; rua=mailto:dmarc@example.com"),
+        ("_dmarc.example.net", TXT, "v=DMARC1; p=quarantine; sp=none; rua=mailto:reports@example.net"),
+        ("dmarc.example.net", A, "192.0.2.31"),
+        ("_dmarc.dmarc.example.net", TXT, "v=DMARC1; p=none; t=y; pct=50; rf=afrf; ri=86400; adkim=x; fo=1:d; rua=mailto:a@example.net,https://dmarc.example.net/r,mailto:b@example.org!10m,mailto:c@example.com; ruf=mailto:f@dmarc.example.net"),
+        ("*._report._dmarc.example.org", TXT, "v=DMARC1"),
+        ("twodmarc.example.net", A, "192.0.2.32"),
+        ("_dmarc.twodmarc.example.net", TXT, "v=DMARC1; p=reject"),
+        ("_dmarc.twodmarc.example.net", TXT, "v=DMARC1; p=none"),
+        ("baddmarc.example.net", A, "192.0.2.33"),
+        ("_dmarc.baddmarc.example.net", TXT, "v=dmarc1; p=reject"),
+        ("badp.example.net", A, "192.0.2.34"),
+        ("_dmarc.badp.example.net", TXT, "v=DMARC1; p=block; rua=mailto:d@badp.example.net"),
+        ("nop.example.net", A, "192.0.2.35"),
+        ("_dmarc.nop.example.net", TXT, "v=DMARC1; sp=reject"),
+        ("three.example.org", A, "192.0.2.36"),
+        ("a.b.c.d.e.f.example.org", A, "192.0.2.37"),
+        ("a.b.c.d.e.f.g.h.i.example.org", A, "192.0.2.38"),
+        ("a.b.c.d.e.f.g.h.i.example.net", A, "192.0.2.39"),
     ]
 };
 
@@ -498,18 +517,20 @@ fn resolve(
 }
 
 /// The fixture zones, answered as a resolver (RD on: AD for example.com) or as their
-/// authoritative servers 127.0.0.1 and ::1 (RD off: AA). `servfail.`, `refused.` and
-/// `silent.` names fail everywhere; the zones under example.org fail at ::1 as named.
+/// authoritative servers 127.0.0.1 and ::1 (RD off: AA). Names with a `servfail`, `refused` or
+/// `silent` label fail everywhere; the zones under example.org fail at ::1 as named.
 pub fn fixtures(a: &Asked) -> Option<Reply> {
     let failed = |rcode| Reply {
         rcode,
         ..Reply::default()
     };
-    match a.name.split('.').next() {
-        Some("silent") => return None,
-        Some("servfail") => return Some(failed(ResponseCode::ServFail)),
-        Some("refused") => return Some(failed(ResponseCode::Refused)),
-        _ => {}
+    for label in a.name.split('.') {
+        match label {
+            "silent" => return None,
+            "servfail" => return Some(failed(ResponseCode::ServFail)),
+            "refused" => return Some(failed(ResponseCode::Refused)),
+            _ => {}
+        }
     }
     let zone = zone_of(&a.name).unwrap_or("example.com");
     let at = (!a.rd).then_some(a.at);
