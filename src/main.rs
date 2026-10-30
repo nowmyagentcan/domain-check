@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
 use std::sync::{Arc, LazyLock};
 
@@ -21,6 +21,7 @@ const AFTER_HELP: &str = "Checks: dns, propagation.
 Only ports 53, 80 and 443 are contacted; nothing is stored.
 
 \x1b[1;4mEnvironment:\x1b[0m
+  NO_COLOR                       no colour
   DOMAIN_CHECK_LOOPBACK_PORTS    dns=N,http=N,https=N for loopback destinations (tests, mirrors)
 
 \x1b[1;4mExamples:\x1b[0m
@@ -182,13 +183,58 @@ fn run_check(args: CheckArgs) -> Result<Done, Error> {
         ports: Ports::from_env()?,
         debug: args.debug,
     };
-    let output = check::run(&args.domains, &options)?;
+    let mut line = Line {
+        on: !args.json && !args.debug && io::stderr().is_terminal(),
+        width: 0,
+    };
+    let output = check::run(&args.domains, &options, &mut |domain, marks, secs| {
+        line.draw(&text::progress(domain, marks, secs))
+    });
+    line.clear();
+    let output = output?;
     let out = match args.json {
         true => json(&output)?,
-        false => text::output(&output.reports),
+        false => text::output(&output),
     };
     let code = output.exit_code();
     Ok(Done { out, code })
+}
+
+/// The progress line on a terminal's stderr, redrawn in place.
+struct Line {
+    on: bool,
+    width: usize,
+}
+
+impl Line {
+    fn draw(&mut self, text: &str) {
+        if self.on {
+            let width = text::width(text);
+            let pad = self.width.saturating_sub(width);
+            err(&format!("\r{text}{:pad$}", ""));
+            self.width = width;
+        }
+    }
+
+    fn clear(&mut self) {
+        if self.width > 0 {
+            err(&format!("\r{:w$}\r", "", w = self.width));
+            self.width = 0;
+        }
+    }
+}
+
+/// `text` as `stream` can show it: ASCII stand-ins where Unicode can't show.
+fn fit(stream: &impl IsTerminal, text: &str) -> String {
+    match text::unicode(stream) {
+        true => text.to_string(),
+        false => text::ascii(text),
+    }
+}
+
+/// Writes on stderr, colour only on a terminal; a closed stderr loses it quietly.
+fn err(text: &str) {
+    let _ = anstream::stderr().write_all(fit(&io::stderr(), text).as_bytes());
 }
 
 /// One JSON object on a line.
@@ -205,11 +251,11 @@ fn json(value: &impl serde::Serialize) -> Result<String, Error> {
 
 /// An error's two lines on stderr: what failed, then how to fix it.
 fn fail(e: &Error) {
-    let mut text = format!("✗ {}\n", e.message);
+    let mut text = format!("{} {}\n", text::red("✗"), e.message);
     if let Some(hint) = &e.hint {
-        text += &format!("  {hint}\n");
+        text += &format!("  {}\n", text::dim(hint));
     }
-    let _ = io::stderr().write_all(text.as_bytes());
+    err(&text);
 }
 
 /// The command line, with clap's own flags described in the same lower case as ours.
@@ -243,18 +289,20 @@ fn main() -> ExitCode {
     };
     match done {
         // A closed stdout (`| head`) means nobody reads the rest: stop quietly.
-        Ok(Done { out, code }) => match io::stdout().write_all(out.as_bytes()) {
-            Ok(()) => ExitCode::from(code),
-            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
-            Err(e) => {
-                fail(&Error::new(
-                    "io",
-                    format!("Couldn't write output: {e}."),
-                    "Try again.",
-                ));
-                ExitCode::from(3)
+        Ok(Done { out, code }) => {
+            match anstream::stdout().write_all(fit(&io::stdout(), &out).as_bytes()) {
+                Ok(()) => ExitCode::from(code),
+                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+                Err(e) => {
+                    fail(&Error::new(
+                        "io",
+                        format!("Couldn't write output: {e}."),
+                        "Try again.",
+                    ));
+                    ExitCode::from(3)
+                }
             }
-        },
+        }
         Err(e) => {
             fail(&e);
             ExitCode::from(if e.code == "usage" { 2 } else { 3 })

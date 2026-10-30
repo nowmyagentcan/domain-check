@@ -445,3 +445,131 @@ fn a_silent_resolver_makes_every_section_unavailable_quickly() {
     assert_eq!(r["propagation"]["reason"], reason);
     assert_eq!(v["summary"]["unavailable"], 2);
 }
+
+/// The text report, with each `checked HH:MM UTC` turned into `checked T`.
+fn text(stub: &DnsStub, args: &[&str], env: &[(&str, &str)]) -> (i32, String) {
+    let (dns, ports) = (stub.addr(), stub.ports());
+    let base = ["--dns", dns.as_str(), "--resolver", dns.as_str()];
+    let env = [&[("DOMAIN_CHECK_LOOPBACK_PORTS", ports.as_str())][..], env].concat();
+    let (code, out, err) = run(&[args, &base].concat(), &env);
+    assert_eq!(err, "");
+    let lines: Vec<String> = out
+        .lines()
+        .map(|l| match l.split_once(" · checked ") {
+            Some((head, at)) if at.len() == 9 && at.ends_with(" UTC") => {
+                format!("{head} · checked T")
+            }
+            _ => l.to_string(),
+        })
+        .collect();
+    (code, lines.join("\n") + "\n")
+}
+
+#[test]
+fn the_text_report_puts_findings_first_then_one_line_per_section() {
+    let stub = DnsStub::new();
+    let (code, out) = text(&stub, &["example.com"], &[]);
+    assert_eq!(code, 0);
+    let want = "example.com  No problems found · checked T
+
+DNS          A 192.0.2.10 · AAAA 2001:db8::10 · MX 20 mx2.example.net, 10 mx1.example.net · NS ns1.example.net, ns2.example.net · DNSSEC signed, validated
+Propagation  consistent: 2 nameserver addresses, 2 resolvers agree on A, AAAA, MX, TXT
+";
+    assert_eq!(out, want);
+
+    let (code, out) = text(
+        &stub,
+        &[
+            "example.com",
+            "printer.test",
+            "nope.example.com",
+            "-c",
+            "dns",
+        ],
+        &[],
+    );
+    assert_eq!(code, 1);
+    let want = "example.com  No problems found · checked T
+
+DNS          A 192.0.2.10 · AAAA 2001:db8::10 · MX 20 mx2.example.net, 10 mx1.example.net · NS ns1.example.net, ns2.example.net · DNSSEC signed, validated
+Propagation  skipped: not requested
+
+✗ printer.test  printer.test is a special-use name (RFC 6761); it never resolves on the public internet.
+                Use domain-check lookup to ask your own resolver about it.
+
+nope.example.com  1 error · checked T
+✗ dns  nope.example.com doesn't exist in DNS (NXDOMAIN).
+       Check the spelling; Registration shows whether it is registered.
+
+DNS          doesn't exist (NXDOMAIN)
+Propagation  skipped: not requested
+
+3 domains: 2 with errors, 1 clean
+";
+    assert_eq!(out, want);
+}
+
+#[test]
+fn findings_line_up_and_sections_that_couldnt_run_say_why() {
+    let stub = DnsStub::new();
+    let (_, out) = text(&stub, &["slow.example.org", "-t", "A"], &[]);
+    let want = "slow.example.org  1 warning · 2 info · checked T
+! propagation  Nameserver ns2.example.net (::1) didn't answer within 4 s.
+               It may be down, or your network may block DNS to outside servers.
+i dns          slow.example.org isn't signed with DNSSEC (no DS record at the parent).
+i dns          No CAA record: any certificate authority may issue certificates for slow.example.org.
+               Add one naming your CA, e.g. 0 issue \"letsencrypt.org\".
+
+DNS          A 192.0.2.30 · NS ns1.example.net, ns2.example.net · DNSSEC unsigned
+Propagation  consistent: 1 nameserver addresses, 2 resolvers agree on A · 1 nameserver address didn't answer
+";
+    assert_eq!(out, want);
+
+    let silent = DnsStub::start(|_| None);
+    let (code, out) = text(&silent, &["xn--bcher-kva.example.com"], &[]);
+    assert_eq!(code, 3);
+    let want = format!(
+        "xn--bcher-kva.example.com (bücher.example.com)  2 checks couldn't run · checked T
+
+DNS          unavailable: Couldn't reach the DNS resolver {}: timeout.
+Propagation  unavailable: No DNS answer, so this check couldn't run.
+",
+        silent.addr()
+    );
+    assert_eq!(out, want);
+}
+
+#[test]
+fn colour_only_when_asked_and_never_with_no_color() {
+    let stub = DnsStub::new();
+    let run_with = |no_color: Option<&str>| {
+        let dns = stub.addr();
+        let args = [
+            "nope.example.com",
+            "-c",
+            "dns",
+            "--dns",
+            &dns,
+            "--resolver",
+            &dns,
+        ];
+        let mut cmd = common::command(&args, &[("CLICOLOR_FORCE", "1")]);
+        match no_color {
+            Some(v) => cmd.env("NO_COLOR", v),
+            None => cmd.env_remove("NO_COLOR"),
+        };
+        String::from_utf8(cmd.output().unwrap().stdout).unwrap()
+    };
+    let coloured = run_with(None);
+    for styled in [
+        "\x1b[1mnope.example.com\x1b[0m",
+        "\x1b[31m✗\x1b[0m dns",
+        "\x1b[2mCheck the spelling;",
+        "\x1b[1mDNS          \x1b[0m",
+    ] {
+        assert!(coloured.contains(styled), "{styled:?} in {coloured:?}");
+    }
+    assert!(!run_with(Some("1")).contains('\x1b'));
+    // An empty NO_COLOR doesn't turn colour off.
+    assert!(run_with(Some("")).contains('\x1b'));
+}

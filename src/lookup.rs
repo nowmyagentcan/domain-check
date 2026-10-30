@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use crate::Error;
 use crate::dns::{self, RecordType, Resolver};
 use crate::input::Target;
+use crate::{Error, text};
 
 pub const TYPES: [RecordType; 15] = [
     RecordType::A,
@@ -202,9 +202,14 @@ impl Answer {
         let (ttl, kind) = (width(1), width(2));
         let mut out = String::new();
         for [owner, ttl_or_note, t, value] in &rows {
-            let line = match t.is_empty() {
-                true => format!("{owner:name$}  {ttl_or_note}"),
-                false => format!("{owner:name$}  {ttl_or_note:ttl$}  {t:kind$}  {value}"),
+            let owner = text::dim(&format!("{owner:name$}"));
+            let line = match (t.is_empty(), ttl_or_note.starts_with("; SERVFAIL")) {
+                (true, true) => format!("{owner}  {}", text::yellow(ttl_or_note)),
+                (true, false) => format!("{owner}  {ttl_or_note}"),
+                _ => {
+                    let t = text::bold(&format!("{t:kind$}"));
+                    format!("{owner}  {ttl_or_note:ttl$}  {t}  {value}")
+                }
             };
             out += line.trim_end();
             out += "\n";

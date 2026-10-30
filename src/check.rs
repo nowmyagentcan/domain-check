@@ -159,7 +159,7 @@ pub const MAX_DOMAINS: usize = 20;
 
 /// One report per input, in input order. A domain given twice is checked once; invalid
 /// inputs make no query.
-pub fn run(inputs: &[String], options: &Options) -> Result<Output, Error> {
+pub fn run(inputs: &[String], options: &Options, progress: &mut Progress) -> Result<Output, Error> {
     if inputs.len() > MAX_DOMAINS {
         return Err(Error::usage(
             format!(
@@ -183,7 +183,7 @@ pub fn run(inputs: &[String], options: &Options) -> Result<Output, Error> {
         let c = match done.get(&d.ascii) {
             Some(c) => c.clone(),
             None => {
-                let c = checked(&d, shared(&mut resolver, options)?, options);
+                let c = checked(&d, shared(&mut resolver, options)?, options, progress);
                 done.insert(d.ascii.clone(), c.clone());
                 c
             }
@@ -272,7 +272,7 @@ impl Outcome {
 }
 
 /// The facts first, then every requested section on its own thread, each within its budget.
-fn checked(d: &Domain, resolver: Arc<Resolver>, o: &Options) -> Checked {
+fn checked(d: &Domain, resolver: Arc<Resolver>, o: &Options, progress: &mut Progress) -> Checked {
     let start = Instant::now();
     let checked_at = now();
     let cx = Arc::new(Cx {
@@ -291,7 +291,8 @@ fn checked(d: &Domain, resolver: Arc<Resolver>, o: &Options) -> Checked {
         sections.not(check, Status::Skipped, "not requested");
     }
     let mut findings = Vec::new();
-    for outcome in collect(&rx, &wanted, start, budget) {
+    let tick = |marks: &[(Check, Mark)], secs| progress(&d.ascii, marks, secs);
+    for outcome in collect(&rx, &wanted, start, budget, tick) {
         match outcome.part {
             Part::Dns(s) => sections.dns = Some(s),
             Part::Propagation(s) => sections.propagation = Some(s),
@@ -351,24 +352,57 @@ fn section(check: Check, cx: &Cx, facts: &Facts) -> Outcome {
     }
 }
 
+/// A section's state while its domain is checked.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Mark {
+    Running,
+    Done,
+    /// Unavailable or rate limited.
+    Down,
+}
+
+/// Told the domain, each section's state and the seconds so far: on every change and once a
+/// second.
+pub type Progress<'a> = dyn FnMut(&str, &[(Check, Mark)], u64) + 'a;
+
 /// Each wanted section's outcome, or `unavailable` once its deadline passes.
 fn collect(
     rx: &mpsc::Receiver<Outcome>,
     wanted: &[Check],
     start: Instant,
     budget: impl Fn(Check) -> Duration,
+    mut tick: impl FnMut(&[(Check, Mark)], u64),
 ) -> Vec<Outcome> {
     let mut done: Vec<Outcome> = Vec::new();
     loop {
-        let pending: Vec<Check> = wanted
+        let marks: Vec<_> = wanted
             .iter()
-            .copied()
-            .filter(|c| !done.iter().any(|o| o.check == *c))
+            .map(|&c| {
+                let status = done.iter().find(|o| o.check == c).map(|o| match &o.part {
+                    Part::Dns(s) => s.status,
+                    Part::Propagation(s) => s.status,
+                    Part::Down(status, _) => *status,
+                });
+                let mark = match status {
+                    None => Mark::Running,
+                    Some(Status::Unavailable | Status::RateLimited) => Mark::Down,
+                    Some(Status::Ok | Status::Skipped) => Mark::Done,
+                };
+                (c, mark)
+            })
+            .collect();
+        let elapsed = start.elapsed();
+        tick(&marks, elapsed.as_secs());
+        let pending: Vec<Check> = marks
+            .iter()
+            .filter(|(_, m)| *m == Mark::Running)
+            .map(|(c, _)| *c)
             .collect();
         let Some(next) = pending.iter().map(|&c| deadline(budget(c)).0).min() else {
             return done;
         };
-        match rx.recv_timeout(next.saturating_sub(start.elapsed())) {
+        let second = Duration::from_millis(1000 - u64::from(elapsed.subsec_millis()));
+        match rx.recv_timeout(next.saturating_sub(elapsed).min(second)) {
             Ok(o) if pending.contains(&o.check) => done.push(o),
             Ok(_) => {}
             Err(RecvTimeoutError::Timeout) => {
@@ -438,7 +472,7 @@ mod tests {
             Check::Dns => Duration::from_secs(1),
             _ => Duration::from_secs(10),
         };
-        let done = collect(&rx, &CHECKS, start, quick);
+        let done = collect(&rx, &CHECKS, start, quick, |_, _| {});
         let took = start.elapsed();
         assert!((1.0..3.0).contains(&took.as_secs_f64()), "{took:?}");
         let mut got: Vec<_> = done.iter().map(reason).collect();
@@ -453,7 +487,7 @@ mod tests {
         );
         // Every sender gone: nothing more can come, so the rest stop at once.
         drop(tx);
-        let done = collect(&rx, &[Check::Dns], Instant::now(), budget);
+        let done = collect(&rx, &[Check::Dns], Instant::now(), budget, |_, _| {});
         assert_eq!(reason(&done[0]).2, "Stopped after 0 s.");
     }
 

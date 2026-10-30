@@ -1,14 +1,101 @@
 //! The text report: per domain a header, the findings with problems first and each hint under
-//! its message, then one line per section.
+//! its message, then one line per section. Styles are ANSI codes that anstream drops when
+//! the stream isn't a terminal or `NO_COLOR` is set.
 
-use crate::report::{Check, Report, Section, Severity};
+use std::io::IsTerminal;
+
+use crate::check::Mark;
+use crate::report::{Check, Output, Report, Section, Severity, Status};
 use crate::sections::dns::Dns;
 use crate::sections::propagation::Propagation;
 
-/// Every report, a blank line apart.
-pub fn output(reports: &[Report]) -> String {
-    let texts: Vec<String> = reports.iter().map(report).collect();
-    texts.join("\n")
+fn paint(code: &str, s: &str) -> String {
+    format!("\x1b[{code}m{s}\x1b[0m")
+}
+
+pub fn bold(s: &str) -> String {
+    paint("1", s)
+}
+
+pub fn dim(s: &str) -> String {
+    paint("2", s)
+}
+
+pub fn red(s: &str) -> String {
+    paint("31", s)
+}
+
+pub fn green(s: &str) -> String {
+    paint("32", s)
+}
+
+pub fn yellow(s: &str) -> String {
+    paint("33", s)
+}
+
+/// False only on a Windows console whose code page isn't UTF-8; pipes always get Unicode.
+pub fn unicode(stream: &impl IsTerminal) -> bool {
+    #[cfg(windows)]
+    if stream.is_terminal() {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetConsoleOutputCP() -> u32;
+        }
+        // SAFETY: no arguments; it only reads the console's output code page.
+        return unsafe { GetConsoleOutputCP() } == 65001;
+    }
+    let _ = stream;
+    true
+}
+
+/// The text with the ASCII stand-ins for its symbols, arrows and box lines.
+pub fn ascii(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '✗' => out.push('x'),
+            '✓' => out.push('+'),
+            '·' | '─' => out.push('-'),
+            '→' => out.push_str("->"),
+            '…' => out.push_str("..."),
+            '✻' => out.push('*'),
+            '›' => out.push('>'),
+            '╭' | '╮' | '╰' | '╯' => out.push('+'),
+            '│' => out.push('|'),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Every report, a blank line apart, and for 2 or more a last line counting them.
+pub fn output(out: &Output) -> String {
+    let texts: Vec<String> = out.reports.iter().map(report).collect();
+    let mut text = texts.join("\n");
+    if out.reports.len() > 1 {
+        text += &format!("\n{}\n", bold(&summary(&out.reports)));
+    }
+    text
+}
+
+/// `3 domains: 1 with errors, 1 with info, 1 clean`: each domain in the group of its worst
+/// finding, an invalid input with the errors.
+fn summary(reports: &[Report]) -> String {
+    let group = |r: &Report| match r.counts {
+        _ if r.error.is_some() => 0,
+        c if c.errors > 0 => 0,
+        c if c.warnings > 0 => 1,
+        c if c.info > 0 => 2,
+        _ => 3,
+    };
+    let names = ["with errors", "with warnings", "with info", "clean"];
+    let parts: Vec<_> = (0..4)
+        .filter_map(|g| match reports.iter().filter(|r| group(r) == g).count() {
+            0 => None,
+            n => Some(format!("{n} {}", names[g])),
+        })
+        .collect();
+    format!("{} domains: {}", reports.len(), parts.join(", "))
 }
 
 pub fn report(r: &Report) -> String {
@@ -19,18 +106,18 @@ pub fn report(r: &Report) -> String {
         true => domain.clone(),
         false => format!("{domain} ({unicode})"),
     };
-    let mut out = format!("{name}  {}\n", summary_line(r));
+    let mut out = format!("{}  {}\n", bold(&name), dim(&summary_line(r)));
     let width = r.findings.iter().map(|f| f.check.key().len()).max();
     let width = width.unwrap_or(0);
     for f in &r.findings {
         let mark = match f.severity {
-            Severity::Error => "✗",
-            Severity::Warning => "!",
-            Severity::Info => "i",
+            Severity::Error => red("✗"),
+            Severity::Warning => yellow("!"),
+            Severity::Info => dim("i"),
         };
         out += &format!("{mark} {:width$}  {}\n", f.check.key(), f.message);
         if let Some(hint) = &f.hint {
-            out += &format!("{:pad$}{hint}\n", "", pad = width + 4);
+            out += &format!("{:pad$}{}\n", "", dim(hint), pad = width + 4);
         }
     }
     out += "\n";
@@ -42,7 +129,7 @@ pub fn report(r: &Report) -> String {
             .map(|x| (Check::Propagation, line(x, propagation))),
     ];
     for (check, line) in lines.into_iter().flatten() {
-        out += &format!("{:13}{line}\n", check.title());
+        out += &format!("{}{line}\n", bold(&format!("{:13}", check.title())));
     }
     out
 }
@@ -51,11 +138,31 @@ fn invalid(r: &Report) -> String {
     let Some(e) = &r.error else {
         return String::new();
     };
-    let mut out = format!("✗ {}  {}\n", r.input, e.message);
+    let mut out = format!("{} {}  {}\n", red("✗"), r.input, e.message);
     if let Some(hint) = &e.hint {
-        out += &format!("{:pad$}{hint}\n", "", pad = r.input.chars().count() + 4);
+        let pad = r.input.chars().count() + 4;
+        out += &format!("{:pad$}{}\n", "", dim(hint));
     }
     out
+}
+
+/// `Checking example.com: dns ✓ propagation …  4 s`
+pub fn progress(domain: &str, marks: &[(Check, Mark)], secs: u64) -> String {
+    let mut out = dim(&format!("Checking {domain}:"));
+    for (check, mark) in marks {
+        let mark = match mark {
+            Mark::Running => dim("…"),
+            Mark::Done => green("✓"),
+            Mark::Down => yellow("!"),
+        };
+        out += &format!(" {} {mark}", dim(check.key()));
+    }
+    out + &dim(&format!("  {secs} s"))
+}
+
+/// How many columns the text takes on a terminal: its characters outside escape codes.
+pub fn width(s: &str) -> usize {
+    anstream::adapter::strip_str(s).to_string().chars().count()
 }
 
 /// `2 errors · 1 warning · 3 info · 1 check couldn't run · checked 15:40 UTC`, zeros left out.
@@ -86,9 +193,11 @@ pub fn summary_line(r: &Report) -> String {
 
 /// A section's line: its summary, or why it has none.
 fn line<T>(s: &Section<T>, summary: fn(&T) -> String) -> String {
-    match &s.data {
-        Some(data) => summary(data),
-        None => format!("{}: {}", s.status.text(), s.reason.as_deref().unwrap_or("")),
+    let why = || format!("{}: {}", s.status.text(), s.reason.as_deref().unwrap_or(""));
+    match (&s.data, s.status) {
+        (Some(data), _) => summary(data),
+        (None, Status::Unavailable | Status::RateLimited) => yellow(&why()),
+        (None, _) => why(),
     }
 }
 
@@ -158,4 +267,30 @@ fn propagation(p: &Propagation) -> String {
         n => out += &format!(" · {n} nameserver addresses didn't answer"),
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ascii_replaces_every_symbol_the_report_uses() {
+        let text = "✗ ! i ✓ a · b → c … ✻ › ╭─╮│╰╯";
+        assert_eq!(ascii(text), "x ! i + a - b -> c ... * > +-+|++");
+    }
+
+    #[test]
+    fn the_progress_line_marks_each_section() {
+        let marks = [
+            (Check::Dns, Mark::Done),
+            (Check::Propagation, Mark::Running),
+        ];
+        let line = progress("example.com", &marks, 4);
+        assert!(line.contains(&green("✓")) && line.contains(&dim("…")));
+        let down = progress("example.com", &[(Check::Dns, Mark::Down)], 0);
+        assert!(down.contains(&yellow("!")));
+        let plain = "Checking example.com: dns ✓ propagation …  4 s";
+        assert_eq!(width(&line), plain.chars().count());
+        assert_eq!(width(&bold("ab")), 2);
+    }
 }

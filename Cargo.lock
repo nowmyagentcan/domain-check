@@ -258,6 +258,7 @@ dependencies = [
 name = "domain-check"
 version = "0.1.0"
 dependencies = [
+ "anstream",
  "base64",
  "clap",
  "hickory-net",
