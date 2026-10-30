@@ -201,7 +201,16 @@ fn judge(
     let days_left = left / DAY;
     let (expired, early) = (left < 0, now < leaf.from);
     let incomplete = chain.len() == 1 && !c.self_signed;
-    let os = verdict.as_ref().err().map(os_error);
+    // macOS words a self-signed certificate as its own error; it is an unknown issuer.
+    let os =
+        verdict
+            .as_ref()
+            .err()
+            .map(os_error)
+            .map(|(code, detail)| match (code, c.self_signed) {
+                ("other", true) => ("unknown_issuer", None),
+                _ => (code, detail),
+            });
     let ours = [
         (expired, "expired"),
         (early, "not_yet_valid"),
@@ -724,6 +733,15 @@ mod tests {
         );
         let want = "cert_untrusted This computer doesn't trust the certificate: self-signed.";
         assert_eq!(found, [want]);
+        let apple = rustls::CertificateError::Other(rustls::OtherError(Arc::new(
+            io::Error::other("“selfsigned.example.com” certificate is not trusted"),
+        )));
+        let (tls, again) = codes(&[cert("www.example.com", true, "x")], Err(apple.into()));
+        assert_eq!(
+            (tls.trust_error, tls.trust_detail),
+            (Some("unknown_issuer"), None)
+        );
+        assert_eq!(again, found);
         let (_, found) = codes(&pair(), unknown());
         let want = "cert_untrusted This computer doesn't trust the certificate: issuer Example CA is unknown.";
         assert_eq!(found, [want]);
