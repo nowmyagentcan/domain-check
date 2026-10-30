@@ -8,7 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::Error;
-use crate::mcp::{self, CheckDomain, Defaults, failure};
+use crate::mcp::{self, CheckDomain, Defaults, arguments, failure};
 
 const PAGE: &str = include_str!("ui.html");
 /// The most a request may send in headers.
@@ -235,7 +235,7 @@ fn answer(body: &[u8], defaults: &Defaults) -> Result<String, Error> {
             "Send the check_domain arguments as JSON.",
         )
     })?;
-    let request = CheckDomain::read(json)?;
+    let request = arguments::<CheckDomain>(json)?;
     let _one = mcp::ONE.lock().unwrap_or_else(|e| e.into_inner());
     let output = request.run(defaults)?;
     serde_json::to_string(&output).map_err(|e| {

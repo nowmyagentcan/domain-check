@@ -70,6 +70,18 @@ pub fn selector(raw: &str) -> Result<String, Error> {
     }
 }
 
+/// The selectors given, each checked and lower-cased, each once.
+pub fn selectors(raw: &[String]) -> Result<Vec<String>, Error> {
+    let mut selectors: Vec<String> = Vec::new();
+    for raw in raw {
+        let s = selector(raw)?;
+        if !selectors.contains(&s) {
+            selectors.push(s);
+        }
+    }
+    Ok(selectors)
+}
+
 /// `tag=value` pairs; values lose their folding whitespace (RFC 6376 §3.2).
 fn pairs(record: &str) -> Vec<(String, String)> {
     let pairs = record.split(';').filter_map(|p| p.split_once('='));

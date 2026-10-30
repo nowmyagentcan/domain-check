@@ -119,11 +119,6 @@ fn names(names: &[String]) -> Schema {
 }
 
 impl CheckDomain {
-    /// The arguments read from JSON; anything the schema refuses is a `bad_request`.
-    pub fn read(json: Value) -> Result<CheckDomain, Error> {
-        arguments(json)
-    }
-
     /// The domain's report, the same as `check --json` gives; an invalid domain is the error.
     pub fn run(&self, d: &Defaults) -> Result<Output, Error> {
         let o = self.options(d)?;
@@ -141,13 +136,6 @@ impl CheckDomain {
             let message = format!("{} DKIM selectors; at most 10.", self.dkim_selectors.len());
             return Err(Error::usage(message, "Pass the selectors your mail uses."));
         }
-        let mut selectors: Vec<String> = Vec::new();
-        for raw in &self.dkim_selectors {
-            let s = dkim::selector(raw)?;
-            if !selectors.contains(&s) {
-                selectors.push(s);
-            }
-        }
         let spf_ip = self.spf_ip.as_deref().map(|ip| {
             ip.trim().parse().map_err(|_| {
                 Error::usage(
@@ -161,7 +149,7 @@ impl CheckDomain {
             dns: server("dns_server", self.dns_server.as_deref())?,
             resolvers: d.resolvers.clone(),
             types: lookup::types(&self.types)?,
-            selectors,
+            selectors: dkim::selectors(&self.dkim_selectors)?,
             spf_ip: spf_ip.transpose()?,
             ca: d.ca.clone(),
             allow_private: self.allow_private,
@@ -188,7 +176,7 @@ fn server(name: &str, raw: Option<&str>) -> Result<Option<SocketAddr>, Error> {
 }
 
 /// `args` as `T`; a missing, mistyped or unknown argument is a `bad_request`.
-fn arguments<T: DeserializeOwned>(args: Value) -> Result<T, Error> {
+pub fn arguments<T: DeserializeOwned>(args: Value) -> Result<T, Error> {
     serde_json::from_value(args).map_err(|e| {
         Error::new(
             "bad_request",
@@ -221,7 +209,7 @@ impl Server {
     )]
     async fn check_domain(&self, args: JsonObject) -> CallToolResult {
         let d = Arc::clone(&self.defaults);
-        answer(move || CheckDomain::read(Value::Object(args))?.run(&d)).await
+        answer(move || arguments::<CheckDomain>(Value::Object(args))?.run(&d)).await
     }
 
     #[tool(

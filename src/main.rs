@@ -243,16 +243,7 @@ fn options(args: &CheckArgs) -> Result<Options, Error> {
             .transpose()?,
         resolvers: resolvers(&args.resolver)?,
         types: lookup::types(&args.types)?,
-        selectors: {
-            let mut selectors: Vec<String> = Vec::new();
-            for raw in &args.dkim_selector {
-                let s = dkim::selector(raw)?;
-                if !selectors.contains(&s) {
-                    selectors.push(s);
-                }
-            }
-            selectors
-        },
+        selectors: dkim::selectors(&args.dkim_selector)?,
         spf_ip: args
             .spf_ip
             .as_deref()
