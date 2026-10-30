@@ -372,3 +372,21 @@ pub fn json(args: &[&str], env: &[(&str, &str)]) -> (i32, serde_json::Value) {
     assert_eq!(err, "", "{args:?}");
     (code, serde_json::from_str(&out).unwrap())
 }
+
+/// Runs the binary with stdout (or stderr) a pipe nobody reads; exit code and the other
+/// stream. The read end is dropped before the spawn, so no other test's child inherits it.
+pub fn closed(args: &[&str], close_stdout: bool) -> (i32, String) {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let mut cmd = command(args, &[]);
+    match close_stdout {
+        true => cmd.stdout(writer).stderr(Stdio::piped()),
+        false => cmd.stderr(writer).stdout(Stdio::piped()),
+    };
+    let out = cmd.output().unwrap();
+    let other = if close_stdout { out.stderr } else { out.stdout };
+    (
+        out.status.code().unwrap(),
+        String::from_utf8(other).unwrap(),
+    )
+}

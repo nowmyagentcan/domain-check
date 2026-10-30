@@ -50,7 +50,7 @@ pub struct Ports {
     pub https: Option<u16>,
 }
 
-pub const PORTS_VAR: &str = "DOMAIN_CHECK_LOOPBACK_PORTS";
+const PORTS_VAR: &str = "DOMAIN_CHECK_LOOPBACK_PORTS";
 
 impl Ports {
     pub fn from_env() -> Result<Ports, Error> {

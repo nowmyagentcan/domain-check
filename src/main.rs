@@ -55,6 +55,9 @@ struct LookupArgs {
     /// print one JSON object
     #[arg(long)]
     json: bool,
+    /// print every query on stderr
+    #[arg(long)]
+    debug: bool,
 }
 
 /// What a command prints on stdout, and its exit code.
@@ -73,24 +76,23 @@ fn run_lookup(args: LookupArgs) -> Result<Done, Error> {
     let ports = Ports::from_env()?;
     let target = match input::target(&args.name) {
         Ok(target) => target,
-        Err(e) if args.json => {
+        Err(error) => {
             #[derive(serde::Serialize)]
             struct Failed {
                 error: Error,
             }
-            let out = json(&Failed { error: e })?;
+            let out = match args.json {
+                true => json(&Failed { error })?,
+                false => {
+                    fail(&error);
+                    String::new()
+                }
+            };
             return Ok(Done { out, code: 1 });
-        }
-        Err(e) => {
-            fail(&e);
-            return Ok(Done {
-                out: String::new(),
-                code: 1,
-            });
         }
     };
     let (name, types) = lookup::question(target, types)?;
-    let resolver = Arc::new(Resolver::new(server, ports, false)?);
+    let resolver = Arc::new(Resolver::new(server, ports, args.debug)?);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -150,8 +152,10 @@ fn main() -> ExitCode {
         Command::Lookup(args) => run_lookup(args),
     };
     match done {
+        // A closed stdout (`| head`) means nobody reads the rest: stop quietly.
         Ok(Done { out, code }) => match io::stdout().write_all(out.as_bytes()) {
             Ok(()) => ExitCode::from(code),
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
             Err(e) => {
                 fail(&Error::new(
                     "io",

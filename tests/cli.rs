@@ -237,3 +237,79 @@ fn version_and_help() {
         assert!(out.contains(line), "{out}");
     }
 }
+
+#[test]
+fn debug_shows_each_query_with_its_server_code_flags_and_time() {
+    let stub = DnsStub::new();
+    let (code, out, err) = lookup(&stub, &["big.example.com", "TXT", "--debug"]);
+    assert_eq!(code, 0);
+    assert_eq!(out.lines().count(), 40);
+    let lines: Vec<_> = err.lines().collect();
+    assert_eq!(lines.len(), 2, "{err}");
+    let udp = format!(
+        "debug: dns udp {} big.example.com TXT NOERROR tc rd ra ad ",
+        stub.addr()
+    );
+    let tcp = format!(
+        "debug: dns tcp {} big.example.com TXT NOERROR rd ra ad ",
+        stub.addr()
+    );
+    for (line, start) in lines.iter().zip([udp, tcp]) {
+        let ms = line
+            .strip_prefix(&start)
+            .and_then(|l| l.strip_suffix(" ms"));
+        assert!(ms.is_some_and(|ms| ms.parse::<u64>().is_ok()), "{line}");
+    }
+    let (code, _, err) = lookup(&stub, &["silent.example.com", "--debug", "A"]);
+    assert_eq!(code, 3);
+    let silent = format!(
+        "debug: dns udp {} silent.example.com A timeout ",
+        stub.addr()
+    );
+    assert_eq!(err.matches(&silent).count(), 2, "{err}");
+}
+
+#[test]
+fn the_loopback_port_swap_applies_to_port_53_only() {
+    let stub = DnsStub::new();
+    let env = [("DOMAIN_CHECK_LOOPBACK_PORTS", stub.ports())];
+    let env: Vec<_> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let args = [
+        "lookup",
+        "example.com",
+        "A",
+        "--dns",
+        "127.0.0.1",
+        "--debug",
+    ];
+    let (code, _, err) = run(&args, &env);
+    assert_eq!(code, 0, "{err}");
+    let to = format!("debug: dns udp {} example.com A NOERROR", stub.addr());
+    assert!(err.starts_with(&to), "{err}");
+    let (_, v) = json(&["lookup", "example.com", "--dns", "::1"], &env);
+    assert_eq!(v["server"], "::1");
+    assert_eq!(stub.queries().last().unwrap().at.to_string(), "::1");
+}
+
+#[test]
+fn closed_pipes_end_quietly() {
+    let stub = DnsStub::new();
+    let dns = stub.addr();
+    let base = ["lookup", "example.com", "MX", "--dns", &dns];
+    let lookup = |extra: &[&'static str]| [&base[..], extra].concat();
+    for extra in [&[][..], &["--json"], &["--debug"], &["--json", "--debug"]] {
+        let (code, err) = common::closed(&lookup(extra), true);
+        assert_eq!(code, 0, "{extra:?}: {err}");
+        assert!(err.lines().all(|l| l.starts_with("debug: ")), "{err}");
+        let (code, out) = common::closed(&lookup(extra), false);
+        assert_eq!(code, 0, "{extra:?}");
+        assert!(out.contains("mx1.example.net"), "{out}");
+    }
+    let silent = ["lookup", "silent.example.com", "--dns", &dns, "--debug"];
+    assert_eq!(common::closed(&silent, false), (3, String::new()));
+    for args in [&["--help"][..], &["lookup", "--help"], &["--version"]] {
+        assert_eq!(common::closed(args, true), (0, String::new()), "{args:?}");
+    }
+    let usage = ["lookup", "example.com", "AXFR"];
+    assert_eq!(common::closed(&usage, false), (2, String::new()));
+}
