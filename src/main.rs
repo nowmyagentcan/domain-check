@@ -6,7 +6,7 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use domain_check::check::{self, Options};
 use domain_check::dns::{self, Resolver};
 use domain_check::sections::email::dkim;
-use domain_check::{Error, Ports, input, lookup, text};
+use domain_check::{Error, Ports, input, lookup, net, text};
 
 // clap prints the name itself.
 static VERSION: LazyLock<String> =
@@ -97,6 +97,12 @@ struct CheckArgs {
     /// public resolver for propagation and DNSSEC (repeatable)
     #[arg(long, value_name = "IP[:PORT]")]
     resolver: Vec<String>,
+    /// also trust the PEM certificates in FILE
+    #[arg(long, value_name = "FILE")]
+    ca_file: Option<String>,
+    /// allow TLS and HTTP to private addresses
+    #[arg(long)]
+    allow_private: bool,
     /// print one JSON object
     #[arg(long)]
     json: bool,
@@ -211,6 +217,13 @@ fn run_check(args: CheckArgs) -> Result<Done, Error> {
                 })
             })
             .transpose()?,
+        ca: args
+            .ca_file
+            .as_deref()
+            .map(net::ca_file)
+            .transpose()?
+            .unwrap_or_default(),
+        allow_private: args.allow_private,
         ports: Ports::from_env()?,
         debug: args.debug,
     };

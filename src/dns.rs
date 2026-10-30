@@ -97,6 +97,7 @@ pub fn show(addr: SocketAddr) -> String {
 }
 
 /// This computer's resolver, or the one `--dns` names, and how queries leave the machine.
+#[derive(Debug)]
 pub struct Resolver {
     servers: Vec<SocketAddr>,
     /// `system (192.168.1.1)` or the `--dns` address.

@@ -224,6 +224,34 @@ fn usage_errors_are_exit_2_with_what_and_how() {
 }
 
 #[test]
+fn a_ca_file_must_hold_certificates_and_be_readable() {
+    let stub = DnsStub::new();
+    let dir = std::env::temp_dir().join(format!("domain-check-ca-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let empty = dir.join("empty.pem");
+    std::fs::write(&empty, "no certificate here\n").unwrap();
+    let empty = empty.to_str().unwrap();
+    let dns = stub.addr();
+    let (code, out, err) = run(&["example.com", "--ca-file", empty, "--dns", &dns], &[]);
+    assert_eq!((code, out.as_str()), (2, ""));
+    let want = format!(
+        "✗ --ca-file {empty} holds no PEM certificate.\n  Pass a file with -----BEGIN CERTIFICATE----- blocks.\n"
+    );
+    assert_eq!(err, want);
+    let missing = dir.join("missing.pem");
+    let missing = missing.to_str().unwrap();
+    let (code, out, err) = run(&["example.com", "--ca-file", missing, "--dns", &dns], &[]);
+    assert_eq!((code, out.as_str()), (3, ""));
+    assert!(
+        err.starts_with(&format!("✗ Couldn't read --ca-file {missing}: ")),
+        "{err}"
+    );
+    assert!(err.ends_with("\n  Check the path and that this account may read it.\n"));
+    assert!(stub.queries().is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn version_and_help() {
     let (code, out, _) = run(&["--version"], &[]);
     let want = "domain-check 0.1.0 (RDAP bootstrap 2026-10-28)\n";

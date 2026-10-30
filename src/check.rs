@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use rustls::pki_types::CertificateDer;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -33,6 +34,9 @@ pub struct Options {
     pub selectors: Vec<String>,
     /// `--spf-ip`: also evaluate SPF for mail sent from this address.
     pub spf_ip: Option<IpAddr>,
+    /// `--ca-file`: certificates to trust besides this computer's own.
+    pub ca: Vec<CertificateDer<'static>>,
+    pub allow_private: bool,
     pub ports: Ports,
     pub debug: bool,
 }
