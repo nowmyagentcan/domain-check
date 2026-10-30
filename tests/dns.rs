@@ -132,7 +132,9 @@ fn a_closed_port_fails_without_an_answer() {
 
 /// `check <domain> --checks dns` against the stub: the exit code and the domain's report.
 fn dns_report(stub: &DnsStub, domain: &str) -> (i32, Value) {
-    let (code, v) = json(&[domain, "--checks", "dns", "--dns", &stub.addr()], &[]);
+    let dns = stub.addr();
+    let args = [domain, "--checks", "dns", "--dns", &dns, "--resolver", &dns];
+    let (code, v) = json(&args, &[]);
     (code, v["reports"][0].clone())
 }
 
@@ -185,7 +187,17 @@ fn the_dns_section_lists_every_record_type_with_ttls() {
     assert_eq!(dns["caa"], caa);
     assert!(codes(&r).is_empty());
     // The JSON keeps the record types in the documented order.
-    let args = ["example.com", "-c", "dns", "--dns", &stub.addr(), "--json"];
+    let dns = stub.addr();
+    let args = [
+        "example.com",
+        "-c",
+        "dns",
+        "--dns",
+        &dns,
+        "--resolver",
+        &dns,
+        "--json",
+    ];
     let (_, out, _) = common::run(&args, &[]);
     let order = [
         "\"A\":",
@@ -320,4 +332,103 @@ fn a_silent_resolver_makes_the_section_unavailable() {
     );
     assert_eq!(dns["records"], Value::Null);
     assert!(codes(&r).is_empty());
+}
+
+#[test]
+fn dnssec_shows_keys_and_which_resolvers_validated() {
+    let stub = DnsStub::new();
+    let (_, r) = dns_report(&stub, "example.com");
+    let ds = j!({ "key_tag": 12345, "algorithm": 13, "algorithm_name": "ECDSAP256SHA256", "digest_type": 2 });
+    let want = j!({ "signed": true, "ds": [ds], "dnskey_algorithms": [13],
+                    "validated_by": [stub.addr()], "bogus": false });
+    assert_eq!(r["dns"]["dnssec"], want);
+    // A second resolver that never answers leaves the first's verdict standing.
+    let silent = DnsStub::start(|_| None);
+    let args = [
+        "example.com",
+        "-c",
+        "dns",
+        "--dns",
+        &stub.addr(),
+        "--resolver",
+        &stub.addr(),
+        "--resolver",
+        &silent.addr(),
+    ];
+    let (_, v) = json(&args, &[]);
+    assert_eq!(
+        v["reports"][0]["dns"]["dnssec"]["validated_by"],
+        j!([stub.addr()])
+    );
+    let soa: Vec<_> = stub
+        .queries()
+        .into_iter()
+        .filter(|q| q.qtype == RecordType::SOA && q.rd)
+        .collect();
+    assert!(soa.iter().all(|q| q.ad && !q.cd), "{soa:?}");
+
+    // A name below the zone apex reports the zone's keys.
+    let (_, r) = dns_report(&stub, "www.example.com");
+    assert_eq!(r["dns"]["dnssec"]["signed"], true);
+    assert!(
+        stub.queries()
+            .iter()
+            .any(|q| q.name == "example.com" && q.qtype == RecordType::DS)
+    );
+}
+
+#[test]
+fn unsigned_and_weakly_signed_zones_are_reported() {
+    let stub = DnsStub::new();
+    let (code, r) = dns_report(&stub, "example.net");
+    assert_eq!(code, 0);
+    let dnssec = &r["dns"]["dnssec"];
+    assert_eq!(
+        (&dnssec["signed"], &dnssec["validated_by"]),
+        (&j!(false), &j!([]))
+    );
+    let message = "example.net isn't signed with DNSSEC (no DS record at the parent).";
+    assert_eq!(
+        finding(&r, "dnssec_unsigned"),
+        ("info", message, &Value::Null)
+    );
+
+    let (code, r) = dns_report(&stub, "example.org");
+    assert_eq!(code, 0);
+    assert_eq!(r["dns"]["dnssec"]["ds"][0]["algorithm_name"], "RSASHA1");
+    assert_eq!(r["dns"]["dnssec"]["dnskey_algorithms"], j!([5]));
+    let message = "example.org is signed with RSASHA1 (algorithm 5), which RFC 8624 says not to use for signing.";
+    let hint = j!("Re-sign with ECDSAP256SHA256 (13) or ED25519 (15).");
+    assert_eq!(
+        finding(&r, "dnssec_weak_algorithm"),
+        ("warning", message, &hint)
+    );
+    assert_eq!(
+        codes(&r)
+            .iter()
+            .filter(|c| **c == "dnssec_weak_algorithm")
+            .count(),
+        1
+    );
+    assert!(!codes(&r).contains(&"dnssec_unsigned"));
+}
+
+#[test]
+fn a_bogus_zone_fails_validation_and_loads_with_checking_disabled() {
+    let stub = DnsStub::new();
+    let (code, r) = dns_report(&stub, "bogus.example.com");
+    assert_eq!(code, 1);
+    assert_eq!(r["dns"]["dnssec"]["bogus"], true);
+    let message = "DNSSEC validation fails for bogus.example.com: validating resolvers answer SERVFAIL, and the records load only with checking disabled.";
+    let hint = j!(
+        "The DS record at your registrar probably doesn't match the zone's keys; update or remove it."
+    );
+    assert_eq!(finding(&r, "dnssec_bogus"), ("error", message, &hint));
+    assert!(codes(&r).contains(&"dns_servfail"));
+    let cd = stub.queries().into_iter().filter(|q| q.cd).count();
+    assert_eq!(cd, 1, "one retry with checking disabled");
+    // A plain SERVFAIL (it fails with CD=1 too) isn't bogus.
+    let (_, r) = dns_report(&stub, "servfail.example.com");
+    assert_eq!(r["dns"]["dnssec"]["bogus"], false);
+    assert!(!codes(&r).contains(&"dnssec_bogus"));
 }

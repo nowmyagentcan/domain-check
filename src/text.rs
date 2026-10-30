@@ -108,5 +108,13 @@ fn dns(d: &Dns) -> String {
             v => parts.push(format!("{t} {v}")),
         }
     }
+    let s = &d.dnssec;
+    let dnssec = match (s.bogus, s.signed, s.validated_by.is_empty()) {
+        (true, _, _) => "bogus",
+        (_, false, _) => "unsigned",
+        (_, _, false) => "signed, validated",
+        _ => "signed, not validated",
+    };
+    parts.push(format!("DNSSEC {dnssec}"));
     parts.join(" · ")
 }

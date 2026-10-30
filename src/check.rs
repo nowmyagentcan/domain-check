@@ -18,8 +18,28 @@ pub const CHECKS: [Check; 1] = [Check::Dns];
 pub struct Options {
     pub checks: Vec<Check>,
     pub dns: Option<SocketAddr>,
+    /// `--resolver`: replaces the public resolvers when given.
+    pub resolvers: Vec<SocketAddr>,
     pub ports: Ports,
     pub debug: bool,
+}
+
+/// Validating public resolvers with published terms (Quad9's unfiltered address).
+const PUBLIC: [(&str, [u8; 4]); 3] = [
+    ("Google", [8, 8, 8, 8]),
+    ("Cloudflare", [1, 1, 1, 1]),
+    ("Quad9", [9, 9, 9, 10]),
+];
+
+/// The resolvers to compare and ask for DNSSEC validation, each with its name.
+fn resolvers(custom: &[SocketAddr]) -> Vec<(&'static str, SocketAddr)> {
+    match custom.is_empty() {
+        true => PUBLIC
+            .iter()
+            .map(|&(name, ip)| (name, SocketAddr::from((ip, 53))))
+            .collect(),
+        false => custom.iter().map(|&addr| ("Custom", addr)).collect(),
+    }
 }
 
 /// `--checks` names (`all`, or any of [`CHECKS`]), in report order.
@@ -45,6 +65,7 @@ pub fn checks(names: &[String]) -> Result<Vec<Check>, Error> {
 pub struct Cx {
     pub resolver: Arc<Resolver>,
     pub domain: String,
+    pub resolvers: Vec<(&'static str, SocketAddr)>,
 }
 
 /// The answers every section starts from, asked once per domain.
@@ -156,6 +177,7 @@ fn domain(input: &str, d: &Domain, resolver: Arc<Resolver>, o: &Options) -> Resu
     let cx = Cx {
         resolver,
         domain: d.ascii.clone(),
+        resolvers: resolvers(&o.resolvers),
     };
     let rt = crate::runtime()?;
     let facts = rt.block_on(Facts::gather(&cx));
@@ -195,6 +217,18 @@ mod tests {
             ("usage", "Unknown check 'smtp'.")
         );
         assert_eq!(e.hint.unwrap(), "Use dns or all.");
+    }
+
+    #[test]
+    fn resolver_flags_replace_the_public_resolvers() {
+        let named = |list: &[(&str, SocketAddr)]| {
+            let v: Vec<_> = list.iter().map(|(n, a)| format!("{n} {a}")).collect();
+            v.join(", ")
+        };
+        let public = "Google 8.8.8.8:53, Cloudflare 1.1.1.1:53, Quad9 9.9.9.10:53";
+        assert_eq!(named(&resolvers(&[])), public);
+        let custom = ["127.0.0.1:5353".parse().unwrap()];
+        assert_eq!(named(&resolvers(&custom)), "Custom 127.0.0.1:5353");
     }
 
     #[test]

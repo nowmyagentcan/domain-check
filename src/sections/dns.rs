@@ -32,7 +32,53 @@ pub struct Dns {
     pub errors: Keyed<String>,
     pub cname_chain: Vec<String>,
     pub caa: Option<Caa>,
+    pub dnssec: Dnssec,
 }
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Dnssec {
+    /// A DS record at the parent.
+    pub signed: bool,
+    pub ds: Vec<Ds>,
+    pub dnskey_algorithms: Vec<u8>,
+    /// The resolvers that set AD: they validated the answer.
+    pub validated_by: Vec<String>,
+    /// Validating resolvers fail the name, and it loads only with checking disabled.
+    pub bogus: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Ds {
+    pub key_tag: u16,
+    pub algorithm: u8,
+    pub algorithm_name: &'static str,
+    pub digest_type: u8,
+}
+
+/// The IANA DNSSEC algorithm registry's mnemonic for `n`.
+fn algorithm_name(n: u8) -> &'static str {
+    match n {
+        1 => "RSAMD5",
+        2 => "DH",
+        3 => "DSA",
+        5 => "RSASHA1",
+        6 => "DSA-NSEC3-SHA1",
+        7 => "RSASHA1-NSEC3-SHA1",
+        8 => "RSASHA256",
+        10 => "RSASHA512",
+        12 => "ECC-GOST",
+        13 => "ECDSAP256SHA256",
+        14 => "ECDSAP384SHA384",
+        15 => "ED25519",
+        16 => "ED448",
+        17 => "SM2SM3",
+        23 => "ECC-GOST12",
+        _ => "unknown",
+    }
+}
+
+/// Algorithms RFC 8624 §3.1 says not to sign with.
+const WEAK: [u8; 6] = [1, 3, 5, 6, 7, 12];
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Rr {
@@ -133,7 +179,120 @@ pub async fn run(cx: &Cx, facts: &Facts) -> (Section<Dns>, Vec<Finding>) {
         }
         out.caa = caa(r, d, get(RecordType::CAA).cloned(), &mut found).await;
     }
+    let apex = facts.zone.as_deref().unwrap_or(d);
+    let keys = match apex == d {
+        true => [
+            get(RecordType::DS).cloned(),
+            get(RecordType::DNSKEY).cloned(),
+        ],
+        false => [None, None],
+    };
+    out.dnssec = dnssec(cx, apex, keys, &mut found).await;
     (Section::ok(out), found)
+}
+
+/// The zone's DS and DNSKEY data (asked unless `keys` has them), and what the validating
+/// resolvers make of the domain's SOA.
+async fn dnssec(
+    cx: &Cx,
+    apex: &str,
+    keys: [Option<Answer>; 2],
+    found: &mut Vec<Finding>,
+) -> Dnssec {
+    let (r, d) = (&cx.resolver, cx.domain.as_str());
+    let [ds, dnskey] = match keys {
+        [Some(ds), Some(dnskey)] => [ds, dnskey],
+        _ => {
+            let mut got = dns::lookups(r, apex, &[RecordType::DS, RecordType::DNSKEY]).await;
+            let dnskey = got.pop().unwrap_or(Err(dns::Failure::Timeout));
+            [got.pop().unwrap_or(Err(dns::Failure::Timeout)), dnskey]
+        }
+    };
+    let values = |a: &Answer, t| match a {
+        Ok(m) => dns::records(m, t).map(|x| dns::value(&x.data)).collect(),
+        Err(_) => Vec::new(),
+    };
+    let field = |v: &str, i| v.split(' ').nth(i).and_then(|f| f.parse::<u16>().ok());
+    let ds_values: Vec<String> = values(&ds, RecordType::DS);
+    let mut out = Dnssec {
+        signed: !ds_values.is_empty(),
+        ds: ds_values
+            .iter()
+            .filter_map(|v| {
+                let algorithm = u8::try_from(field(v, 1)?).ok()?;
+                Some(Ds {
+                    key_tag: field(v, 0)?,
+                    algorithm,
+                    algorithm_name: algorithm_name(algorithm),
+                    digest_type: u8::try_from(field(v, 2)?).ok()?,
+                })
+            })
+            .collect(),
+        ..Dnssec::default()
+    };
+    let mut algorithms: Vec<u8> = values(&dnskey, RecordType::DNSKEY)
+        .iter()
+        .filter_map(|v| u8::try_from(field(v, 2)?).ok())
+        .collect();
+    algorithms.sort_unstable();
+    algorithms.dedup();
+    out.dnskey_algorithms = algorithms;
+
+    let asks = cx.resolvers.iter().map(|&(_, at)| {
+        let (r, d) = (std::sync::Arc::clone(r), d.to_string());
+        async move { (at, r.query(at, &d, RecordType::SOA, dns::RECURSIVE).await) }
+    });
+    let replies = dns::join(asks).await;
+    let answered: Vec<_> = replies
+        .iter()
+        .filter_map(|(at, a)| Some((*at, a.as_ref().ok()?)))
+        .collect();
+    out.validated_by = answered
+        .iter()
+        .filter(|(_, m)| m.metadata.authentic_data)
+        .map(|(at, _)| dns::show(*at))
+        .collect();
+    let failing = |m: &dns::Message| m.metadata.response_code == ResponseCode::ServFail;
+    if let Some((first, _)) = answered
+        .first()
+        .filter(|_| answered.iter().all(|(_, m)| failing(m)))
+    {
+        let unchecked = dns::Ask {
+            cd: true,
+            ..dns::RECURSIVE
+        };
+        let again = r.query(*first, d, RecordType::SOA, unchecked).await;
+        out.bogus = again.is_ok_and(|m| !failing(&m));
+    }
+
+    if out.bogus {
+        let message = format!(
+            "DNSSEC validation fails for {d}: validating resolvers answer SERVFAIL, and the records load only with checking disabled."
+        );
+        let hint = "The DS record at your registrar probably doesn't match the zone's keys; update or remove it.";
+        found.push(finding(Severity::Error, "dnssec_bogus", message, hint));
+    } else if !out.signed && rcode(Some(&ds)).is_some_and(|c| c != ResponseCode::ServFail) {
+        let message = format!("{apex} isn't signed with DNSSEC (no DS record at the parent).");
+        found.push(finding(Severity::Info, "dnssec_unsigned", message, ""));
+    }
+    let mut used: Vec<u8> = out.ds.iter().map(|x| x.algorithm).collect();
+    used.extend(&out.dnskey_algorithms);
+    used.sort_unstable();
+    used.dedup();
+    for n in used.into_iter().filter(|n| WEAK.contains(n)) {
+        let message = format!(
+            "{apex} is signed with {} (algorithm {n}), which RFC 8624 says not to use for signing.",
+            algorithm_name(n)
+        );
+        let hint = "Re-sign with ECDSAP256SHA256 (13) or ED25519 (15).";
+        found.push(finding(
+            Severity::Warning,
+            "dnssec_weak_algorithm",
+            message,
+            hint,
+        ));
+    }
+    out
 }
 
 /// `domain`, then each CNAME target in turn, for at most [`MAX_HOPS`] hops.

@@ -71,9 +71,12 @@ struct CheckArgs {
         default_value = "all"
     )]
     checks: Vec<String>,
-    /// resolver for every lookup
+    /// resolver for every lookup except the comparisons
     #[arg(long, value_name = "IP[:PORT]")]
     dns: Option<String>,
+    /// public resolver for propagation and DNSSEC (repeatable)
+    #[arg(long, value_name = "IP[:PORT]")]
+    resolver: Vec<String>,
     /// print one JSON object
     #[arg(long)]
     json: bool,
@@ -160,6 +163,11 @@ fn run_check(args: CheckArgs) -> Result<Done, Error> {
             .as_deref()
             .map(|s| dns::server("--dns", s))
             .transpose()?,
+        resolvers: args
+            .resolver
+            .iter()
+            .map(|s| dns::server("--resolver", s))
+            .collect::<Result<_, _>>()?,
         ports: Ports::from_env()?,
         debug: args.debug,
     };
