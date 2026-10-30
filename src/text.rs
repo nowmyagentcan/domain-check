@@ -347,8 +347,14 @@ fn tls(t: &Tls) -> String {
     if let Some(leaf) = t.chain.first() {
         parts.push(cn(&leaf.subject).into());
         parts.push(cn(&leaf.issuer).into());
+        let days = t.days_left.unwrap_or_default();
+        parts.push(format!("until {} ({days} days)", &leaf.not_after[..10]));
     }
     parts.push(protocol.replace("TLSv", "TLS "));
+    parts.push(match t.trust_error {
+        None => "trusted".into(),
+        Some(e) => format!("not trusted: {}", e.replace('_', " ")),
+    });
     parts.join(" · ")
 }
 

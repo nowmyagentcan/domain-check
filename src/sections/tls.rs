@@ -32,6 +32,19 @@ pub struct Tls {
     pub protocol: Option<String>,
     pub cipher: Option<String>,
     pub alpn: Option<String>,
+    /// No trust problem: the OS verifier accepts the chain and our own checks agree.
+    pub trusted: Option<bool>,
+    /// `expired`, `not_yet_valid`, `not_valid_for_name`, `incomplete_chain` (our own
+    /// checks first), then the OS verifier's `unknown_issuer`, `revoked` or `other`.
+    pub trust_error: Option<&'static str>,
+    /// The OS verifier's own words for `other`.
+    pub trust_detail: Option<String>,
+    pub names_match: Option<bool>,
+    pub not_before: Option<String>,
+    pub not_after: Option<String>,
+    /// Whole days until `not_after`, negative once expired.
+    pub days_left: Option<i64>,
+    pub lifetime_days: Option<i64>,
     /// The certificates as the server presented them, its own first.
     pub chain: Vec<Cert>,
 }
@@ -58,17 +71,29 @@ fn text_time(unix: i64) -> String {
     t.format(&Rfc3339).unwrap_or_default()
 }
 
+/// A presented certificate, with what judging it needs.
+pub struct Parsed {
+    pub cert: Cert,
+    /// Its validity, in Unix seconds.
+    pub from: i64,
+    pub until: i64,
+    pub rsa_bits: Option<usize>,
+    pub issuer_cn: Option<String>,
+}
+
 /// A certificate's fields; `None` when it isn't DER X.509.
-pub fn parse(der: &[u8]) -> Option<Cert> {
+pub fn parse(der: &[u8]) -> Option<Parsed> {
     let (_, x) = x509_parser::parse_x509_certificate(der).ok()?;
     let sans = match x.subject_alternative_name() {
         Ok(Some(ext)) => ext.value.general_names.iter().filter_map(san).collect(),
         _ => Vec::new(),
     };
     let spki = x.public_key();
+    let mut rsa_bits = None;
     let key = match spki.parsed() {
         Ok(PublicKey::RSA(rsa)) => {
-            format!("RSA {}", dkim::bits(rsa.modulus).unwrap_or_default())
+            rsa_bits = dkim::bits(rsa.modulus);
+            format!("RSA {}", rsa_bits.unwrap_or_default())
         }
         Ok(PublicKey::EC(_)) => {
             let curve = spki.algorithm.parameters.as_ref();
@@ -89,19 +114,226 @@ pub fn parse(der: &[u8]) -> Option<Cert> {
     };
     let alg = &x.signature_algorithm.algorithm;
     let signature = oid2sn(alg, oid_registry()).map_or(alg.to_id_string(), String::from);
-    let validity = x.validity();
-    Some(Cert {
+    let (from, until) = (x.validity().not_before, x.validity().not_after);
+    let (from, until) = (from.timestamp(), until.timestamp());
+    let cert = Cert {
         subject: x.subject().to_string(),
         issuer: x.issuer().to_string(),
         serial: x.serial.to_str_radix(16),
-        not_before: text_time(validity.not_before.timestamp()),
-        not_after: text_time(validity.not_after.timestamp()),
+        not_before: text_time(from),
+        not_after: text_time(until),
         sans,
         key,
         signature,
         self_signed: x.subject().as_raw() == x.issuer().as_raw(),
         ca: x.is_ca(),
+    };
+    let issuer_cn = x.issuer().iter_common_name().next();
+    let issuer_cn = issuer_cn.and_then(|cn| cn.as_str().ok()).map(String::from);
+    Some(Parsed {
+        cert,
+        from,
+        until,
+        rsa_bits,
+        issuer_cn,
     })
+}
+
+/// RFC 6125 §6.4: `host` equals a DNS name, or a `*.` name covers its first label.
+pub fn names_match(host: &str, sans: &[String]) -> bool {
+    sans.iter().any(|san| {
+        let san = san.trim_end_matches('.').to_ascii_lowercase();
+        match san.strip_prefix("*.") {
+            Some(rest) => host.split_once('.').is_some_and(|(first, tail)| {
+                !first.is_empty() && tail == rest && rest.contains('.')
+            }),
+            None => san == host,
+        }
+    })
+}
+
+/// The longest lifetime the CA/Browser Forum Baseline Requirements (§6.3.2) allow for a
+/// certificate issued on `day` (`YYYY-MM-DD`).
+fn max_lifetime(day: &str) -> i64 {
+    match day {
+        d if d < "2026-03-15" => 398,
+        d if d < "2027-03-15" => 200,
+        d if d < "2029-03-15" => 100,
+        _ => 47,
+    }
+}
+
+const DAY: i64 = 86400;
+
+/// How the OS verifier's refusal is reported: the trust error and, for `other`, its words.
+fn os_error(e: &rustls::Error) -> (&'static str, Option<String>) {
+    use rustls::CertificateError as C;
+    match e {
+        rustls::Error::InvalidCertificate(c) => match c {
+            C::Expired | C::ExpiredContext { .. } => ("expired", None),
+            C::NotValidYet | C::NotValidYetContext { .. } => ("not_yet_valid", None),
+            C::NotValidForName | C::NotValidForNameContext { .. } => ("not_valid_for_name", None),
+            C::UnknownIssuer => ("unknown_issuer", None),
+            C::Revoked => ("revoked", None),
+            C::Other(e) => ("other", Some(e.to_string())),
+            c => ("other", Some(format!("{c:?}"))),
+        },
+        e => ("other", Some(e.to_string())),
+    }
+}
+
+/// Fills in the verdict on the presented chain at `now` (Unix seconds), with its findings.
+fn judge(
+    d: &str,
+    tls: &mut Tls,
+    chain: &[Parsed],
+    verdict: &Result<(), rustls::Error>,
+    now: i64,
+) -> Vec<Finding> {
+    let mut found = Vec::new();
+    let Some(leaf) = chain.first() else {
+        return found;
+    };
+    let c = &leaf.cert;
+    let matched = names_match(d, &c.sans);
+    let left = leaf.until - now;
+    let life = leaf.until - leaf.from;
+    let days_left = left / DAY;
+    let (expired, early) = (left < 0, now < leaf.from);
+    let incomplete = chain.len() == 1 && !c.self_signed;
+    let os = verdict.as_ref().err().map(os_error);
+    let ours = [
+        (expired, "expired"),
+        (early, "not_yet_valid"),
+        (!matched, "not_valid_for_name"),
+        (incomplete, "incomplete_chain"),
+    ];
+    let trust_error = match ours.iter().find(|(problem, _)| *problem) {
+        Some((_, code)) => Some(*code),
+        None => os.as_ref().map(|(code, _)| *code),
+    };
+    let detail = os.and_then(|(_, detail)| detail);
+    tls.trusted = Some(trust_error.is_none());
+    tls.trust_error = trust_error;
+    tls.trust_detail = detail.clone().filter(|_| trust_error == Some("other"));
+    tls.names_match = Some(matched);
+    tls.not_before = Some(c.not_before.clone());
+    tls.not_after = Some(c.not_after.clone());
+    tls.days_left = Some(days_left);
+    tls.lifetime_days = Some((life + DAY / 2) / DAY);
+    let issuer = leaf.issuer_cn.clone().unwrap_or_else(|| c.issuer.clone());
+    let (until, from) = (&c.not_after[..10], &c.not_before[..10]);
+    let plural = |n: i64| format!("{n} day{}", if n == 1 { "" } else { "s" });
+    if expired {
+        let message = format!(
+            "The certificate expired on {until} ({} ago).",
+            plural(-days_left)
+        );
+        let hint = "Renew it and reload the web server.";
+        found.push(finding(Severity::Error, "cert_expired", message, hint));
+    } else if early {
+        let message = format!("The certificate isn't valid until {from}.");
+        let hint = "Check the server's clock and this computer's clock.";
+        found.push(finding(
+            Severity::Error,
+            "cert_not_yet_valid",
+            message,
+            hint,
+        ));
+    } else if left
+        < if life < 10 * DAY {
+            life / 2
+        } else {
+            (life / 3).min(30 * DAY)
+        }
+    {
+        let message = format!(
+            "The certificate expires in {} ({until}); renewal is due.",
+            plural(days_left)
+        );
+        let hint = "Check that automatic renewal is running.";
+        found.push(finding(Severity::Warning, "cert_expiring", message, hint));
+    }
+    if !matched {
+        let names = match c.sans.is_empty() {
+            true => c.subject.clone(),
+            false => c.sans.join(", "),
+        };
+        let message = format!("The certificate is for {names}, not {d}.");
+        let hint = format!("Issue a certificate that includes {d}.");
+        found.push(finding(
+            Severity::Error,
+            "cert_name_mismatch",
+            message,
+            &hint,
+        ));
+    }
+    match trust_error {
+        Some("incomplete_chain") => {
+            let message = format!(
+                "The server sent only its own certificate, not the intermediate from {issuer}; some clients will refuse it."
+            );
+            let hint = "Configure the server with the full chain (e.g. fullchain.pem).";
+            found.push(finding(Severity::Error, "chain_incomplete", message, hint));
+        }
+        Some("revoked") => {
+            let message = "The certificate has been revoked by its issuer.".into();
+            found.push(finding(
+                Severity::Error,
+                "cert_revoked",
+                message,
+                "Replace it.",
+            ));
+        }
+        Some(code @ ("unknown_issuer" | "other")) => {
+            let why = match (c.self_signed, code) {
+                (true, _) => "self-signed".to_string(),
+                (false, "unknown_issuer") => format!("issuer {issuer} is unknown"),
+                _ => detail.unwrap_or_default(),
+            };
+            let message = format!("This computer doesn't trust the certificate: {why}.");
+            let hint = "Use a certificate from a public CA, or pass --ca-file for an internal CA.";
+            found.push(finding(Severity::Error, "cert_untrusted", message, hint));
+        }
+        _ => {}
+    }
+    // The leaf and the intermediates; a root sent along is the client's to judge.
+    let issued = chain
+        .iter()
+        .enumerate()
+        .filter(|(i, p)| *i == 0 || !p.cert.self_signed);
+    let mut weak: Vec<usize> = issued.clone().filter_map(|(_, p)| p.rsa_bits).collect();
+    weak.retain(|&bits| bits < 2048);
+    weak.dedup();
+    for bits in weak {
+        let message =
+            format!("The certificate uses an RSA {bits}-bit key; 2048 is the minimum CAs issue.");
+        found.push(finding(Severity::Warning, "cert_weak_key", message, ""));
+    }
+    let sha1 = |s: &str| s.to_ascii_lowercase().contains("sha1") || s == "1.2.840.10045.4.1";
+    if issued.clone().any(|(_, p)| sha1(&p.cert.signature)) {
+        let message = "The certificate is signed with SHA-1, which clients reject.".into();
+        found.push(finding(
+            Severity::Error,
+            "cert_sha1",
+            message,
+            "Reissue it.",
+        ));
+    }
+    let max = max_lifetime(from);
+    if verdict.is_ok() && life > max * DAY {
+        let message = format!(
+            "The certificate's lifetime is {} days, more than the {max} days allowed for certificates issued on {from}.",
+            (life + DAY / 2) / DAY
+        );
+        found.push(finding(
+            Severity::Info,
+            "cert_lifetime_over_limit",
+            message,
+            "",
+        ));
+    }
+    found
 }
 
 fn san(name: &GeneralName) -> Option<String> {
@@ -313,10 +545,11 @@ fn handshake(net: &Net, d: &str, ip: IpAddr, mut sock: TcpStream) -> (Section<Tl
         let ms = start.elapsed().as_millis();
         net::debug(&format!("tls handshake {d} {how} {ms} ms"));
     }
-    let seen = recorder.seen.lock().ok().and_then(|mut s| s.take());
-    let chain: Vec<Cert> = seen
+    let (presented, verdict) = recorder.seen.lock().ok().and_then(|mut s| s.take()).unzip();
+    let chain: Vec<Parsed> = presented
         .iter()
-        .flat_map(|(chain, _)| chain.iter().filter_map(|c| parse(c)))
+        .flatten()
+        .filter_map(|c| parse(c))
         .collect();
     match outcome {
         Ok(()) => {
@@ -355,6 +588,199 @@ fn handshake(net: &Net, d: &str, ip: IpAddr, mut sock: TcpStream) -> (Section<Tl
             }
         },
     }
-    tls.chain = chain;
+    if let Some(verdict) = &verdict {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        found.extend(judge(d, &mut tls, &chain, verdict, now));
+    }
+    tls.chain = chain.into_iter().map(|p| p.cert).collect();
     (Section::ok(tls), found)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: i64 = 1_793_000_000; // 2026-10-26
+
+    fn cert(subject: &str, self_signed: bool, signature: &str) -> Parsed {
+        Parsed {
+            cert: Cert {
+                subject: format!("CN={subject}"),
+                issuer: "CN=Example CA".into(),
+                not_before: text_time(NOW - 10 * DAY),
+                not_after: text_time(NOW + 80 * DAY),
+                sans: vec![subject.into()],
+                key: "EC P-256".into(),
+                signature: signature.into(),
+                self_signed,
+                ..Cert::default()
+            },
+            from: NOW - 10 * DAY,
+            until: NOW + 80 * DAY,
+            rsa_bits: None,
+            issuer_cn: Some("Example CA".into()),
+        }
+    }
+
+    fn codes(chain: &[Parsed], verdict: Result<(), rustls::Error>) -> (Tls, Vec<String>) {
+        let mut tls = Tls::default();
+        let found = judge("www.example.com", &mut tls, chain, &verdict, NOW);
+        let found = found.iter().map(|f| format!("{} {}", f.code, f.message));
+        (tls, found.collect())
+    }
+
+    fn pair() -> Vec<Parsed> {
+        let ca = cert("Example CA", false, "sha256WithRSAEncryption");
+        vec![cert("www.example.com", false, "ecdsa-with-SHA256"), ca]
+    }
+
+    #[test]
+    fn names_match_exactly_or_by_one_wildcard_label() {
+        let m = |host, san: &str| names_match(host, &[san.to_string()]);
+        assert!(m("www.example.com", "www.example.com"));
+        assert!(m("www.example.com", "WWW.Example.com."));
+        assert!(m("www.example.com", "*.example.com"));
+        assert!(!m("example.com", "*.example.com"));
+        assert!(!m("a.www.example.com", "*.example.com"));
+        assert!(!m("www.example.com", "w*.example.com"));
+        assert!(!m("example.com", "*.com"));
+        assert!(!names_match("www.example.com", &[]));
+    }
+
+    #[test]
+    fn lifetimes_follow_the_baseline_requirements_schedule() {
+        let max: Vec<_> = [
+            "2025-12-01",
+            "2026-03-15",
+            "2027-03-15",
+            "2029-03-14",
+            "2029-03-15",
+        ]
+        .map(max_lifetime)
+        .into();
+        assert_eq!(max, [398, 200, 100, 100, 47]);
+    }
+
+    #[test]
+    fn a_trusted_chain_has_its_dates_and_no_findings() {
+        let (tls, found) = codes(&pair(), Ok(()));
+        assert_eq!(found, Vec::<String>::new());
+        assert_eq!((tls.trusted, tls.trust_error), (Some(true), None));
+        assert_eq!((tls.days_left, tls.lifetime_days), (Some(80), Some(90)));
+        assert_eq!(tls.not_after.as_deref(), Some("2027-01-14T07:33:20Z"));
+    }
+
+    #[test]
+    fn renewal_is_due_with_a_third_of_the_lifetime_or_30_days_left() {
+        let left = |life: i64, left: i64| {
+            let mut chain = pair();
+            (chain[0].from, chain[0].until) = (NOW + left - life, NOW + left);
+            chain[0].cert.not_after = text_time(NOW + left);
+            let (_, found) = codes(&chain, Ok(()));
+            found.iter().any(|f| f.starts_with("cert_expiring"))
+        };
+        assert!(left(90 * DAY, 29 * DAY + 3600));
+        assert!(!left(90 * DAY, 31 * DAY));
+        assert!(!left(398 * DAY, 31 * DAY));
+        assert!(left(398 * DAY, 29 * DAY));
+        assert!(left(30 * DAY, 9 * DAY));
+        assert!(left(6 * DAY, 2 * DAY));
+        assert!(!left(6 * DAY, 4 * DAY));
+        let (_, found) = {
+            let mut chain = pair();
+            chain[0].until = NOW + 4 * DAY + 60;
+            chain[0].cert.not_after = text_time(chain[0].until);
+            codes(&chain, Ok(()))
+        };
+        assert_eq!(
+            found,
+            ["cert_expiring The certificate expires in 4 days (2026-10-30); renewal is due."]
+        );
+    }
+
+    #[test]
+    fn our_own_checks_name_the_trust_error_before_the_os() {
+        let unknown = || Err(rustls::CertificateError::UnknownIssuer.into());
+        let mut chain = pair();
+        chain[0].until = NOW - DAY - 60;
+        chain[0].cert.not_after = text_time(chain[0].until);
+        let (tls, found) = codes(&chain, Err(rustls::CertificateError::Expired.into()));
+        assert_eq!(
+            (tls.trust_error, tls.days_left),
+            (Some("expired"), Some(-1))
+        );
+        assert_eq!(
+            found,
+            ["cert_expired The certificate expired on 2026-10-25 (1 day ago)."]
+        );
+        let (tls, found) = codes(&[cert("www.example.com", false, "x")], unknown());
+        assert_eq!(tls.trust_error, Some("incomplete_chain"));
+        let want = "chain_incomplete The server sent only its own certificate, not the intermediate from Example CA; some clients will refuse it.";
+        assert_eq!(found, [want]);
+        let (tls, found) = codes(&[cert("www.example.com", true, "x")], unknown());
+        assert_eq!(
+            (tls.trusted, tls.trust_error),
+            (Some(false), Some("unknown_issuer"))
+        );
+        let want = "cert_untrusted This computer doesn't trust the certificate: self-signed.";
+        assert_eq!(found, [want]);
+        let (_, found) = codes(&pair(), unknown());
+        let want = "cert_untrusted This computer doesn't trust the certificate: issuer Example CA is unknown.";
+        assert_eq!(found, [want]);
+        let other = rustls::CertificateError::Other(rustls::OtherError(Arc::new(
+            io::Error::other("CSSMERR_TP_NOT_TRUSTED"),
+        )));
+        let (tls, found) = codes(&pair(), Err(other.into()));
+        assert_eq!(tls.trust_detail.as_deref(), Some("CSSMERR_TP_NOT_TRUSTED"));
+        let want =
+            "cert_untrusted This computer doesn't trust the certificate: CSSMERR_TP_NOT_TRUSTED.";
+        assert_eq!(found, [want]);
+        let (_, found) = codes(&pair(), Err(rustls::CertificateError::Revoked.into()));
+        assert_eq!(
+            found,
+            ["cert_revoked The certificate has been revoked by its issuer."]
+        );
+        let mut chain = pair();
+        chain[0].cert.sans = vec!["*.example.net".into(), "example.net".into()];
+        let (tls, found) = codes(&chain, Ok(()));
+        assert_eq!(tls.names_match, Some(false));
+        let want = "cert_name_mismatch The certificate is for *.example.net, example.net, not www.example.com.";
+        assert_eq!(found, [want]);
+    }
+
+    #[test]
+    fn weak_keys_sha1_and_long_lifetimes_skip_the_root() {
+        let mut chain = pair();
+        chain[1].rsa_bits = Some(1024);
+        chain[1].cert.signature = "sha1WithRSAEncryption".into();
+        let mut root = cert("Old Root", true, "sha1WithRSAEncryption");
+        root.rsa_bits = Some(1024);
+        chain.push(root);
+        let (_, found) = codes(&chain, Ok(()));
+        assert_eq!(
+            found,
+            [
+                "cert_weak_key The certificate uses an RSA 1024-bit key; 2048 is the minimum CAs issue.",
+                "cert_sha1 The certificate is signed with SHA-1, which clients reject."
+            ]
+        );
+        // A self-signed certificate sent alone is the server's own, so it is judged.
+        let (_, found) = codes(&[chain.remove(2)], Ok(()));
+        assert!(
+            found.iter().any(|f| f.starts_with("cert_weak_key")),
+            "{found:?}"
+        );
+        let mut chain = pair();
+        chain[0].from = NOW - 150 * DAY;
+        chain[0].cert.not_before = text_time(chain[0].from);
+        let (_, found) = codes(&chain, Ok(()));
+        let want = "cert_lifetime_over_limit The certificate's lifetime is 230 days, more than the 200 days allowed for certificates issued on 2026-05-29.";
+        assert_eq!(found, [want]);
+        let unknown = Err(rustls::CertificateError::UnknownIssuer.into());
+        let (_, found) = codes(&chain, unknown);
+        assert!(
+            found[0].starts_with("cert_untrusted") && found.len() == 1,
+            "{found:?}"
+        );
+    }
 }

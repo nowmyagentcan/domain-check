@@ -77,6 +77,24 @@ fn the_handshake_reports_the_chain_and_what_was_negotiated() {
         (&j!("CN=Test Intermediate"), &j!("CN=Test Root"))
     );
     assert_eq!((&inter["ca"], &inter["sans"]), (&j!(true), &j!([])));
+    let verdict = [
+        "trusted",
+        "trust_error",
+        "trust_detail",
+        "names_match",
+        "lifetime_days",
+    ];
+    let verdict = verdict.map(|k| &t[k]);
+    assert_eq!(
+        verdict,
+        [&j!(true), &j!(null), &j!(null), &j!(true), &j!(90)]
+    );
+    assert_eq!(
+        (&t["not_before"], &t["not_after"]),
+        (&leaf["not_before"], &leaf["not_after"])
+    );
+    let days = t["days_left"].as_i64().unwrap();
+    assert!((88..=89).contains(&days), "{days}");
     assert_eq!(r["findings"], j!([]));
     // The handshake sends no request.
     assert_eq!((web.connections(), web.hits()), (1, Vec::new()));
@@ -156,4 +174,116 @@ fn names_without_an_address_are_skipped() {
     let (_, r) = allowed(&stub, &web, "gone.example.com");
     assert_eq!(r["tls"]["reason"], "gone.example.com doesn't exist in DNS.");
     assert_eq!(web.connections(), 0);
+}
+
+/// The `tls` findings of `domain`: code and message, with every other report field ignored.
+fn judged(stub: &DnsStub, web: &Web, domain: &str) -> (Value, Vec<(String, String)>) {
+    let (_, r) = allowed(stub, web, domain);
+    let found = found(&r)
+        .into_iter()
+        .map(|(code, _, message)| (code, message));
+    (r["tls"].clone(), found.collect())
+}
+
+fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+    list.iter()
+        .map(|(c, m)| (c.to_string(), m.to_string()))
+        .collect()
+}
+
+#[test]
+fn certificate_dates_are_judged_from_the_certificate() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let (t, found) = judged(&stub, &web, "expired.example.com");
+    assert_eq!(
+        (&t["trusted"], &t["trust_error"]),
+        (&j!(false), &j!("expired"))
+    );
+    let until = &t["not_after"].as_str().unwrap()[..10];
+    let days = -t["days_left"].as_i64().unwrap();
+    assert!((9..=10).contains(&days), "{t}");
+    let want = format!("The certificate expired on {until} ({days} days ago).");
+    assert_eq!(found, pairs(&[("cert_expired", &want)]));
+    assert_eq!(t["chain"].as_array().unwrap().len(), 2);
+
+    let (t, found) = judged(&stub, &web, "future.example.com");
+    assert_eq!(t["trust_error"], "not_yet_valid");
+    let from = &t["not_before"].as_str().unwrap()[..10];
+    let want = format!("The certificate isn't valid until {from}.");
+    assert_eq!(found, pairs(&[("cert_not_yet_valid", &want)]));
+
+    let (t, found) = judged(&stub, &web, "expiring.example.com");
+    assert_eq!((&t["trusted"], &t["lifetime_days"]), (&j!(true), &j!(90)));
+    let until = &t["not_after"].as_str().unwrap()[..10];
+    let days = t["days_left"].as_i64().unwrap();
+    let want = format!("The certificate expires in {days} days ({until}); renewal is due.");
+    assert_eq!(found, pairs(&[("cert_expiring", &want)]));
+
+    let (t, found) = judged(&stub, &web, "lifetime.example.com");
+    assert_eq!((&t["trusted"], &t["lifetime_days"]), (&j!(true), &j!(300)));
+    let from = &t["not_before"].as_str().unwrap()[..10];
+    let want = format!(
+        "The certificate's lifetime is 300 days, more than the 200 days allowed for certificates issued on {from}."
+    );
+    assert_eq!(found, pairs(&[("cert_lifetime_over_limit", &want)]));
+}
+
+#[test]
+fn names_issuers_and_keys_are_judged_with_the_full_chain_shown() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let (t, found) = judged(&stub, &web, "wrongname.example.com");
+    assert_eq!(
+        (&t["names_match"], &t["trust_error"]),
+        (&j!(false), &j!("not_valid_for_name"))
+    );
+    let want = "The certificate is for other.example.net, not wrongname.example.com.";
+    assert_eq!(found, pairs(&[("cert_name_mismatch", want)]));
+
+    let (t, found) = judged(&stub, &web, "selfsigned.example.com");
+    assert_eq!(t["trust_error"], "unknown_issuer");
+    assert_eq!(
+        (&t["chain"][0]["self_signed"], &t["chain"][1]),
+        (&j!(true), &Value::Null)
+    );
+    let want = "This computer doesn't trust the certificate: self-signed.";
+    assert_eq!(found, pairs(&[("cert_untrusted", want)]));
+
+    let (t, found) = judged(&stub, &web, "leafonly.example.com");
+    assert_eq!(
+        (&t["trusted"], &t["trust_error"]),
+        (&j!(false), &j!("incomplete_chain"))
+    );
+    let want = "The server sent only its own certificate, not the intermediate from Test Intermediate; some clients will refuse it.";
+    assert_eq!(found, pairs(&[("chain_incomplete", want)]));
+
+    let (t, found) = judged(&stub, &web, "weak.example.com");
+    assert_eq!(t["chain"][1]["key"], "RSA 1024");
+    assert_eq!(t["chain"][1]["subject"], "CN=Weak Intermediate");
+    let codes: Vec<_> = found.iter().map(|(c, _)| c.as_str()).collect();
+    assert_eq!(codes, ["cert_untrusted", "cert_weak_key"], "{found:?}");
+    let want = "The certificate uses an RSA 1024-bit key; 2048 is the minimum CAs issue.";
+    assert_eq!(found[1].1, want);
+}
+
+#[test]
+fn the_text_report_names_the_certificate() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let dns = stub.addr();
+    let ports = web.ports(&stub);
+    let args = [
+        "tls.example.com",
+        "-c",
+        "tls",
+        "--dns",
+        &dns,
+        "--ca-file",
+        &web.ca,
+        "--allow-private",
+    ];
+    let (code, out, err) = common::run(&args, &[("DOMAIN_CHECK_LOOPBACK_PORTS", &ports)]);
+    assert_eq!((code, err.as_str()), (0, ""));
+    let line = out.lines().find(|l| l.starts_with("Certificate")).unwrap();
+    let (head, tail) = line.split_once(" · until ").unwrap();
+    assert_eq!(head, "Certificate  tls.example.com · Test Intermediate");
+    assert!(tail.ends_with(" days) · TLS 1.3 · trusted"), "{line}");
 }
