@@ -22,6 +22,7 @@ hickory-net = { version = "0.26.3", default-features = false, features = ["tokio
 hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
 hickory-resolver = { version = "0.26.3", default-features = false, features = ["system-config", "tokio"] }
 idna = "1.1.0"
+percent-encoding = "2.3.2"
 rmcp = { version = "3.8.0", default-features = false, features = ["server", "macros", "transport-io", "schemars"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8.5"

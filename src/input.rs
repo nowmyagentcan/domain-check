@@ -5,6 +5,7 @@
 use std::net::IpAddr;
 
 use idna::uts46::{AsciiDenyList, DnsLength, Hyphens, Uts46};
+use percent_encoding::percent_decode_str;
 
 use crate::Error;
 
@@ -40,7 +41,8 @@ pub struct Domain {
 /// A domain to check, from a name, a URL or an email address.
 pub fn domain(input: &str) -> Result<Domain, Error> {
     let s = trimmed(input)?;
-    let host = match s.split_once("://") {
+    let url = s.split_once("://");
+    let host = match url {
         Some((_, rest)) => {
             let authority = rest.split(['/', '?', '#', '\\']).next().unwrap_or_default();
             authority.rsplit_once('@').map_or(authority, |(_, h)| h)
@@ -48,6 +50,12 @@ pub fn domain(input: &str) -> Result<Domain, Error> {
         None => s.rsplit_once('@').map_or(s, |(_, h)| h),
     };
     let (host, port_ignored) = without_port(host);
+    // A URL's host may be percent-encoded, as browsers read it (WHATWG URL host parsing).
+    let decoded = percent_decode_str(host).decode_utf8();
+    let host = match (url, &decoded) {
+        (Some(_), Ok(d)) => d,
+        _ => host,
+    };
     let host = host.strip_suffix('.').unwrap_or(host);
     if let Some(ip) = ip(host) {
         return Err(Error::new(

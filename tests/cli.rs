@@ -632,7 +632,6 @@ fn colour_only_when_asked_and_never_with_no_color() {
 }
 
 #[test]
-#[ignore = "known bug: DC12"]
 fn percent_encoded_url_hosts_are_decoded() {
     let stub = DnsStub::new();
     let dns = stub.addr();

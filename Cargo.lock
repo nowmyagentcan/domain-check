@@ -392,6 +392,7 @@ dependencies = [
  "hickory-proto",
  "hickory-resolver",
  "idna",
+ "percent-encoding",
  "rcgen",
  "rmcp",
  "rustls",
