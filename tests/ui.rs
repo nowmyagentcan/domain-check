@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::web::Web;
-use common::{DnsStub, command};
+use common::{DnsStub, command, ended, stderr_of};
 use serde_json::{Value, json};
 
 const PAGE: &str = include_str!("../src/ui.html");
@@ -507,4 +507,94 @@ fn opens_the_browser_unless_told_not_to() {
         format!("{url}\n")
     );
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn ends_quietly_when_stdout_closes() {
+    // The read end closes before the spawn, so no test spawning beside this one holds it.
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let mut child = command(&["ui", "--no-open"], &[])
+        .stdout(writer)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    assert_eq!(
+        (ended(&mut child), stderr_of(&mut child)),
+        (Some(0), String::new())
+    );
+}
+
+#[test]
+fn keeps_serving_when_clients_hang_up() {
+    // A resolver that takes its time, so a client can leave while its check runs.
+    let slow = DnsStub::start(|a| {
+        thread::sleep(Duration::from_millis(200));
+        common::fixtures(a)
+    });
+    let dns = slow.addr();
+    let mut server = Server::start(&["--resolver", &dns], &[]);
+    let port = server.port;
+    let post = |body: &str| {
+        format!(
+            "POST /api HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    };
+    let quick = post(r#"{"domain":"printer.test"}"#);
+    let check = post(&format!(
+        r#"{{"domain":"example.com","checks":["dns"],"dns_server":"{dns}"}}"#
+    ));
+    let connect = || TcpStream::connect(("127.0.0.1", port)).unwrap();
+    // Leaves after half the headers, after half the body, before reading the answer, and
+    // while a check is still running.
+    connect().write_all(&quick.as_bytes()[..20]).unwrap();
+    connect()
+        .write_all(&quick.as_bytes()[..quick.len() - 5])
+        .unwrap();
+    for request in [&quick, &check] {
+        for _ in 0..5 {
+            let mut s = connect();
+            s.write_all(request.as_bytes()).unwrap();
+            s.shutdown(Shutdown::Both).unwrap();
+        }
+    }
+    let mut s = connect();
+    s.write_all(check.as_bytes()).unwrap();
+    let mut answer = String::new();
+    s.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
+    assert!(answer.contains(r#""domain":"example.com""#));
+    assert_eq!(server.child.try_wait().unwrap(), None, "the server stopped");
+}
+
+#[test]
+fn runs_with_stderr_closed() {
+    let mut child = command(&["ui", "--no-open"], &[])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stderr.take());
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert!(line.starts_with("Open http://127.0.0.1:"), "{line}");
+    let port = line.trim_end().trim_end_matches("  (Ctrl+C to stop)");
+    let port = port.rsplit(':').next().unwrap();
+    // The port stays taken by the first server while a second one asks for it.
+    let mut busy = command(&["ui", "--no-open", "--port", port], &[])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(busy.stderr.take());
+    assert_eq!(ended(&mut busy), Some(3));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let out = command(&["mcp"], &[])
+        .stderr(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
 }
