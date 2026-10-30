@@ -5,6 +5,7 @@ use std::sync::{Arc, LazyLock};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use domain_check::check::{self, Options};
 use domain_check::dns::{self, Resolver};
+use domain_check::sections::email::dkim;
 use domain_check::{Error, Ports, input, lookup, text};
 
 // clap prints the name itself.
@@ -26,6 +27,7 @@ Only ports 53, 80 and 443 are contacted; nothing is stored.
 
 \x1b[1;4mExamples:\x1b[0m
   domain-check example.com
+  domain-check example.com --checks email -s google
   domain-check example.com --checks email --spf-ip 192.0.2.10
   domain-check example.com --checks propagation --types A,MX
   domain-check lookup _dmarc.example.com TXT
@@ -74,6 +76,9 @@ struct CheckArgs {
         default_value = "all"
     )]
     checks: Vec<String>,
+    /// DKIM selector to look up (repeatable)
+    #[arg(short = 's', long, value_name = "S")]
+    dkim_selector: Vec<String>,
     /// evaluate SPF for this sending IP
     #[arg(long, value_name = "IP")]
     spf_ip: Option<String>,
@@ -184,7 +189,16 @@ fn run_check(args: CheckArgs) -> Result<Done, Error> {
             .map(|s| dns::server("--resolver", s))
             .collect::<Result<_, _>>()?,
         types: lookup::types(&args.types)?,
-        selectors: Vec::new(),
+        selectors: {
+            let mut selectors: Vec<String> = Vec::new();
+            for raw in &args.dkim_selector {
+                let s = dkim::selector(raw)?;
+                if !selectors.contains(&s) {
+                    selectors.push(s);
+                }
+            }
+            selectors
+        },
         spf_ip: args
             .spf_ip
             .as_deref()

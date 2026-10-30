@@ -10,6 +10,7 @@ use crate::check::{Cx, Facts};
 use crate::dns::{self, Answer, Failure, RecordType, Resolver, ResponseCode};
 use crate::report::{Check, Finding, Keyed, Section, Severity, Status};
 
+pub mod dkim;
 pub mod dmarc;
 pub mod spf;
 
@@ -19,6 +20,7 @@ pub struct Email {
     /// `None` when the domain has no SPF record.
     pub spf: Option<spf::Spf>,
     pub dmarc: Option<dmarc::Dmarc>,
+    pub dkim: dkim::Dkim,
     /// The parts whose lookup failed (`spf`, `dmarc`, …) and why: they show as `null`.
     pub errors: Keyed<String>,
 }
@@ -105,14 +107,18 @@ pub async fn run(cx: &Cx, facts: &Facts) -> (Section<Email>, Vec<Finding>) {
     });
     let spf = tokio::spawn(spf::run(Arc::clone(&mail), cx.spf_ip));
     let dmarc = tokio::spawn(dmarc::run(Arc::clone(&mail)));
+    let dkim = tokio::spawn(dkim::run(Arc::clone(&mail), cx.selectors.clone()));
     let mut g = Gather::default();
     let mx = mx(&mail, facts, &mut g.found).await;
     let spf = g.take("spf", dns::wait(spf).await);
     let dmarc = g.take("dmarc", dns::wait(dmarc).await);
+    let (dkim, found) = dns::wait(dkim).await;
+    g.found.extend(found);
     let email = Email {
         mx,
         spf,
         dmarc,
+        dkim,
         errors: g.errors,
     };
     (Section::ok(email), g.found)

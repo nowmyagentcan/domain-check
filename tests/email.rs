@@ -924,3 +924,186 @@ fn broken_and_doubled_dmarc_records() {
     assert_eq!(r["email"]["errors"]["dmarc"], "SERVFAIL");
     assert!(found(&r, "dmarc_").is_empty());
 }
+
+/// The DKIM keys found for these selectors at dkim.example.net: selector, type and bits.
+fn keys(stub: &DnsStub, selectors: &[&str]) -> (Vec<(String, String, Value)>, Value) {
+    let args: Vec<_> = selectors.iter().flat_map(|s| ["-s", s]).collect();
+    let (_, r) = email(stub, "dkim.example.net", &args);
+    let keys = r["email"]["dkim"]["keys"].as_array().unwrap();
+    let text = |k: &Value, f: &str| k[f].as_str().unwrap_or_default().to_string();
+    let got = keys
+        .iter()
+        .map(|k| (text(k, "selector"), text(k, "key_type"), k["bits"].clone()))
+        .collect();
+    (got, r)
+}
+
+#[test]
+fn dkim_keys_have_their_type_and_size() {
+    let stub = DnsStub::new();
+    let selectors = [
+        "rsa1024", "rsa2048", "rsa4096", "bare1024", "bare2048", "bare4096", "ed",
+    ];
+    let (got, r) = keys(&stub, &selectors);
+    let want = [1024, 2048, 4096, 1024, 2048, 4096, 256];
+    let want: Vec<_> = selectors
+        .iter()
+        .zip(want)
+        .map(|(s, bits)| {
+            let t = if *s == "ed" { "ed25519" } else { "rsa" };
+            (s.to_string(), t.to_string(), j!(bits))
+        })
+        .collect();
+    assert_eq!(got, want);
+    let dkim = &r["email"]["dkim"];
+    assert_eq!(
+        (&dkim["given"], &dkim["selectors"]),
+        (&j!(true), &j!(selectors))
+    );
+    let key = &dkim["keys"][0];
+    assert_eq!(
+        (
+            &key["name"],
+            &key["revoked"],
+            &key["testing"],
+            &key["error"]
+        ),
+        (
+            &j!("rsa1024._domainkey.dkim.example.net"),
+            &j!(false),
+            &j!(false),
+            &j!(null)
+        )
+    );
+    assert!(
+        key["record"]
+            .as_str()
+            .unwrap()
+            .starts_with("v=DKIM1; k=rsa; p=MI")
+    );
+    assert_eq!(
+        found(&r, "dkim_"),
+        [
+            (
+                "dkim_weak_key",
+                "warning",
+                "The DKIM key at rsa1024._domainkey.dkim.example.net is RSA 1024 bits; 2048 is recommended (RFC 8301)."
+            ),
+            (
+                "dkim_weak_key",
+                "warning",
+                "The DKIM key at bare1024._domainkey.dkim.example.net is RSA 1024 bits; 2048 is recommended (RFC 8301)."
+            ),
+        ]
+    );
+    assert_eq!(
+        finding(&r, "dkim_weak_key").2,
+        "Generate a 2048-bit key under a new selector and switch to it."
+    );
+}
+
+#[test]
+fn dkim_records_that_are_weak_revoked_testing_broken_or_missing() {
+    let stub = DnsStub::new();
+    let selectors = [
+        "small", "revoked", "testing", "badb64", "other", "nothere", "servfail",
+    ];
+    let (got, r) = keys(&stub, &selectors);
+    let t = |s: &str, k: &str, b: Value| (s.to_string(), k.to_string(), b);
+    assert_eq!(
+        got,
+        [
+            t("small", "rsa", j!(512)),
+            t("revoked", "rsa", j!(null)),
+            t("testing", "rsa", j!(2048)),
+            t("badb64", "rsa", j!(null)),
+            t("servfail", "unknown", j!(null)),
+        ]
+    );
+    let failed = &r["email"]["dkim"]["keys"][4];
+    assert_eq!(
+        (&failed["record"], &failed["error"]),
+        (&j!(null), &j!("SERVFAIL"))
+    );
+    assert_eq!(
+        found(&r, "dkim_"),
+        [
+            (
+                "dkim_syntax",
+                "error",
+                "The DKIM record at badb64._domainkey.dkim.example.net is invalid: p= isn't valid base64."
+            ),
+            (
+                "dkim_weak_key",
+                "error",
+                "The DKIM key at small._domainkey.dkim.example.net is RSA 512 bits; receivers reject keys under 1024 (RFC 8301)."
+            ),
+            (
+                "dkim_not_found",
+                "warning",
+                "No DKIM key at other._domainkey.dkim.example.net."
+            ),
+            (
+                "dkim_not_found",
+                "warning",
+                "No DKIM key at nothere._domainkey.dkim.example.net."
+            ),
+            (
+                "dkim_revoked",
+                "info",
+                "The DKIM key at revoked._domainkey.dkim.example.net is revoked (empty p=)."
+            ),
+            (
+                "dkim_testing",
+                "info",
+                "The DKIM key at testing._domainkey.dkim.example.net has t=y (testing)."
+            ),
+        ]
+    );
+    assert_eq!(
+        finding(&r, "dkim_not_found").2,
+        "Pass --dkim-selector with the s= value from a DKIM-Signature header of your mail."
+    );
+    assert_eq!(
+        finding(&r, "dkim_syntax").2,
+        "Copy the record again from your mail provider."
+    );
+}
+
+#[test]
+fn without_selectors_the_8_common_ones_are_tried() {
+    let stub = DnsStub::new();
+    let (got, r) = keys(&stub, &[]);
+    assert_eq!(got, [("google".to_string(), "rsa".to_string(), j!(2048))]);
+    let common = [
+        "default",
+        "google",
+        "selector1",
+        "selector2",
+        "k1",
+        "s1",
+        "s2",
+        "dkim",
+    ];
+    let dkim = &r["email"]["dkim"];
+    assert_eq!(
+        (&dkim["given"], &dkim["selectors"]),
+        (&j!(false), &j!(common))
+    );
+    assert!(found(&r, "dkim_").is_empty());
+    let (_, r) = email(&stub, "nomail.example.net", &[]);
+    assert_eq!(
+        found(&r, "dkim_"),
+        [(
+            "dkim_not_found",
+            "info",
+            "No DKIM key under the 8 common selectors; this doesn't mean DKIM is missing."
+        )]
+    );
+    let (code, _, err) = common::run(&["example.com", "-s", "a b"], &[]);
+    assert_eq!(code, 2);
+    assert_eq!(
+        err,
+        "✗ 'a b' isn't a valid DKIM selector.\n  Use the s= value from a DKIM-Signature header.\n"
+    );
+}

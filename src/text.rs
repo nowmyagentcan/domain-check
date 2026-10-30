@@ -284,7 +284,27 @@ fn email(e: &Email) -> String {
         Some(d) => format!("DMARC p={}", d.tags.p.as_deref().unwrap_or("?")),
         None => "DMARC none".into(),
     };
-    let mut parts = [spf, dmarc];
+    let keys = e
+        .dkim
+        .keys
+        .iter()
+        .filter(|k| k.record.is_some() && !k.revoked);
+    let keys: Vec<_> = keys
+        .map(|k| match k.key_type {
+            "ed25519" => format!("{} Ed25519", k.selector),
+            _ => format!(
+                "{} RSA {}",
+                k.selector,
+                k.bits.map_or("?".into(), |b| b.to_string())
+            ),
+        })
+        .collect();
+    let dkim = match (keys.is_empty(), e.dkim.given) {
+        (false, _) => format!("DKIM {}", keys.join(", ")),
+        (true, false) => "DKIM none of 8 common selectors".into(),
+        (true, true) => format!("DKIM none at {}", e.dkim.selectors.join(", ")),
+    };
+    let mut parts = [spf, dmarc, dkim];
     for (part, name) in parts.iter_mut().zip(["spf", "dmarc"]) {
         if let Some(why) = e.errors.get(name) {
             *part = format!("{} {why}", &part[..part.find(' ').unwrap_or(0)]);

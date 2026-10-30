@@ -303,6 +303,8 @@ pub const MAIL: &[(&str, RecordType, &str)] = {
         ("a.b.c.d.e.f.example.org", A, "192.0.2.37"),
         ("a.b.c.d.e.f.g.h.i.example.org", A, "192.0.2.38"),
         ("a.b.c.d.e.f.g.h.i.example.net", A, "192.0.2.39"),
+        // DKIM keys are made by dkim()
+        ("dkim.example.net", A, "192.0.2.40"),
     ]
 };
 
@@ -343,12 +345,68 @@ fn mail(owner: &str, t: RecordType) -> Option<Vec<Record>> {
     )
 }
 
+/// A DER value: tag, length, body.
+fn der(tag: u8, body: &[u8]) -> Vec<u8> {
+    let len = body.len();
+    let len = match len {
+        ..128 => vec![len as u8],
+        128..256 => vec![0x81, len as u8],
+        _ => vec![0x82, (len >> 8) as u8, len as u8],
+    };
+    [&[tag][..], &len, body].concat()
+}
+
+/// A DKIM `p=` value: an RSA public key with a `bits`-bit modulus, as SubjectPublicKeyInfo or
+/// as a bare RSAPublicKey.
+pub fn rsa_key(bits: usize, spki: bool) -> String {
+    use base64::Engine;
+    let mut modulus = vec![0, 0xc5];
+    modulus.resize(bits / 8 + 1, 0x5a);
+    let key = der(0x30, &[der(0x02, &modulus), der(0x02, &[1, 0, 1])].concat());
+    let rsa_encryption = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
+    let algorithm = der(0x30, &[der(0x06, &rsa_encryption), vec![0x05, 0]].concat());
+    let spki_der = der(
+        0x30,
+        &[algorithm, der(0x03, &[&[0][..], &key].concat())].concat(),
+    );
+    base64::engine::general_purpose::STANDARD.encode(if spki { spki_der } else { key })
+}
+
+/// The key records under `<selector>._domainkey.dkim.example.net`.
+fn dkim(owner: &str) -> Option<String> {
+    let selector = owner.strip_suffix("._domainkey.dkim.example.net")?;
+    let rsa = |bits| format!("v=DKIM1; k=rsa; p={}", rsa_key(bits, true));
+    Some(match selector {
+        "google" | "rsa2048" => rsa(2048),
+        "rsa1024" => rsa(1024),
+        "rsa4096" => rsa(4096),
+        "small" => rsa(512),
+        "bare1024" => format!("p={}", rsa_key(1024, false)),
+        "bare2048" => format!("p={}", rsa_key(2048, false)),
+        "bare4096" => format!("p={}", rsa_key(4096, false)),
+        "ed" => "v=DKIM1; k=ed25519; p=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=".into(),
+        "revoked" => "v=DKIM1; p=".into(),
+        "testing" => format!("v=DKIM1; t=y; p={}", rsa_key(2048, true)),
+        "badb64" => "v=DKIM1; p=not base64!".into(),
+        "other" => "google-site-verification=abc".into(),
+        _ => return None,
+    })
+}
+
 /// `owner`'s records of type `t` as the server at `at` holds them (`None`: as a resolver sees
 /// them); `None` when the name doesn't exist, `[]` when it has no such records.
 pub fn records(owner: &str, t: RecordType, at: Option<IpAddr>) -> Option<Vec<Record>> {
     use RecordType as T;
     if let Some(found) = mail(owner, t) {
         return Some(found);
+    }
+    if let Some(key) = dkim(owner) {
+        let strings = key
+            .as_bytes()
+            .chunks(255)
+            .map(|c| String::from_utf8(c.to_vec()).unwrap());
+        let txt = record(owner, 300, RData::TXT(TXT::new(strings.collect())));
+        return Some(if t == T::TXT { vec![txt] } else { Vec::new() });
     }
     let rec = |ttl, data| vec![record(owner, ttl, data)];
     let a = |ip: [u8; 4]| rec(300, RData::A(A(Ipv4Addr::from(ip))));
