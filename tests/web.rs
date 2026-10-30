@@ -320,16 +320,18 @@ fn headers_of_the_last_https_answer_are_graded() {
 
 #[test]
 #[ignore = "known bug: DC01"]
-fn https_that_fails_verification_is_a_finding_without_the_tls_check() {
+fn https_that_fails_is_a_finding_without_the_tls_check() {
     let (stub, web) = (DnsStub::new(), Web::new());
     for domain in [
         "selfsigned.example.com",
         "expired.example.com",
         "wrongname.example.com",
+        "closed.example.com",
     ] {
         let (_, r) = allowed(&stub, &web, domain);
         assert!(r["http"]["https"]["error"].is_string(), "{}", r["http"]);
-        // tls isn't requested, so only http can tell the user that https doesn't load.
+        // tls isn't requested, so only http can tell the user that https doesn't load or
+        // isn't served at all.
         let findings = r["findings"].as_array().unwrap();
         assert!(
             findings.iter().any(|f| f["check"] == "http"
