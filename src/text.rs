@@ -380,6 +380,15 @@ fn web(w: &Web) -> String {
     if w.https.hops.len() != 1 || w.https.error.is_some() {
         parts.push(chain("https", &w.https));
     }
+    if let Some(h) = &w.headers {
+        for (name, key) in [
+            ("HSTS", "strict-transport-security"),
+            ("CSP", "content-security-policy"),
+        ] {
+            let sent = h.get(key).is_some_and(Option::is_some);
+            parts.push(format!("{name} {}", if sent { "yes" } else { "no" }));
+        }
+    }
     parts.join(" · ")
 }
 

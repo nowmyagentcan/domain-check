@@ -372,6 +372,8 @@ pub const MAIL: &[(&str, RecordType, &str)] = {
         ("endless.example.com", A, "127.0.0.1"),
         ("status.example.com", A, "127.0.0.1"),
         ("garbage.example.com", A, "127.0.0.1"),
+        ("headers.example.com", A, "127.0.0.1"),
+        ("bare.example.com", A, "127.0.0.1"),
     ]
 };
 

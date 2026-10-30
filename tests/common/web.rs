@@ -46,6 +46,23 @@ impl Reply {
     }
 }
 
+/// The headers every https site sends unless its route says otherwise.
+const GOOD: [(&str, &str); 7] = [
+    ("Content-Type", "text/html"),
+    (
+        "Strict-Transport-Security",
+        "max-age=63072000; includeSubDomains",
+    ),
+    (
+        "Content-Security-Policy",
+        "default-src 'self'; frame-ancestors 'none'",
+    ),
+    ("X-Content-Type-Options", "nosniff"),
+    ("Referrer-Policy", "no-referrer"),
+    ("Permissions-Policy", "camera=()"),
+    ("Cross-Origin-Opener-Policy", "same-origin"),
+];
+
 /// The answer to `path` on `host`: the first label of the host picks the site. Status 0 sends
 /// bytes that aren't HTTP.
 pub fn route(host: &str, path: &str, https: bool) -> Reply {
@@ -77,8 +94,25 @@ pub fn route(host: &str, path: &str, https: bool) -> Reply {
             ..Reply::new(200, &[("Content-Type", "text/plain")], "")
         },
         ("status", true, "/") => to(301, "/missing"),
-        ("status", true, _) => Reply::new(404, &[], "not found\n"),
+        ("status", true, _) => Reply::new(404, &GOOD, "not found\n"),
         ("garbage", true, _) => Reply::new(0, &[], ""),
+        ("headers", true, _) => Reply::new(
+            200,
+            &[
+                ("Strict-Transport-Security", "max-age=300"),
+                (
+                    "Content-Security-Policy",
+                    "script-src 'self' 'unsafe-inline'",
+                ),
+                ("X-XSS-Protection", "1; mode=block"),
+                ("Expect-CT", "max-age=0"),
+                ("Server", "nginx/1.25.3"),
+                ("X-Powered-By", "PHP/8.3"),
+            ],
+            "ok\n",
+        ),
+        ("bare", true, _) => Reply::new(200, &[("Content-Type", "text/plain")], "ok\n"),
+        (_, true, _) => Reply::new(200, &GOOD, "ok\n"),
         _ => Reply::new(200, &[("Content-Type", "text/plain")], "ok\n"),
     }
 }

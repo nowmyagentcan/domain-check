@@ -54,7 +54,7 @@ fn both_chains_are_followed_to_their_end() {
         j!({ "start": "http://web.example.com/", "final": "https://web.example.com/",
              "final_status": 200, "error": null, "hops": [
             { "url": "http://web.example.com/", "status": 301, "location": "https://web.example.com/", "hsts": null },
-            { "url": "https://web.example.com/", "status": 200, "location": null, "hsts": null },
+            { "url": "https://web.example.com/", "status": 200, "location": null, "hsts": "max-age=63072000; includeSubDomains" },
         ]})
     );
     assert_eq!(hops(&h["https"]), ["200 https://web.example.com/"]);
@@ -264,6 +264,56 @@ fn the_text_report_shows_the_chains() {
     let line = out.lines().find(|l| l.starts_with("Web")).unwrap();
     assert_eq!(
         line,
-        "Web          http → 302 /next → 301 https://relative.example.com/ → 200"
+        "Web          http → 302 /next → 301 https://relative.example.com/ → 200 · HSTS yes · CSP yes"
     );
+}
+
+#[test]
+fn headers_of_the_last_https_answer_are_graded() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let (_, r) = allowed(&stub, &web, "web.example.com");
+    let headers = &r["http"]["headers"];
+    assert_eq!(
+        headers["strict-transport-security"],
+        "max-age=63072000; includeSubDomains"
+    );
+    assert_eq!(
+        (&headers["server"], &headers["x-aspnetmvc-version"]),
+        (&Value::Null, &Value::Null)
+    );
+    assert_eq!(headers.as_object().unwrap().len(), 16);
+    let (code, r) = allowed(&stub, &web, "headers.example.com");
+    assert_eq!(code, 0);
+    let mut found = found(&r);
+    found.retain(|f| !f.starts_with("http_no_https_redirect"));
+    assert_eq!(
+        found,
+        [
+            "frame_protection_missing: Neither X-Frame-Options nor CSP frame-ancestors is set, so other sites can frame this page.",
+            "hsts_short: HSTS max-age is 300 s; at least 15552000 (180 days) is recommended.",
+            "xcto_missing: No \"X-Content-Type-Options: nosniff\" header.",
+            "coop_missing: No Cross-Origin-Opener-Policy header.",
+            "csp_unsafe: The Content-Security-Policy allows 'unsafe-inline' scripts.",
+            "deprecated_header: X-XSS-Protection is obsolete; browsers ignore it.",
+            "deprecated_header: Expect-CT is obsolete; browsers ignore it.",
+            "permissions_policy_missing: No Permissions-Policy header.",
+            "referrer_policy_missing: No Referrer-Policy header.",
+            "version_leak: The Server header reveals software details (nginx/1.25.3).",
+            "version_leak: The X-Powered-By header reveals software details (PHP/8.3).",
+        ]
+    );
+    let (_, r) = allowed(&stub, &web, "bare.example.com");
+    let codes: Vec<_> = r["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert!(
+        codes.contains(&"hsts_missing") && codes.contains(&"csp_missing"),
+        "{codes:?}"
+    );
+    // An https chain that fails or ends on http has nothing to grade.
+    let (_, r) = allowed(&stub, &web, "selfsigned.example.com");
+    assert_eq!(r["http"]["headers"], Value::Null);
 }
