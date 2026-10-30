@@ -98,7 +98,7 @@ jobs:
             if [ "$RUNNER_OS" = Linux ]; then file domain-check | grep -E 'static(-pie|ally) linked'; fi
           fi
           test -s LICENSE && test -s THIRD-PARTY-LICENSES.txt
-          ./domain-check --version | grep -x 'domain-check [0-9.]*'
+          ./domain-check --version | grep -E '^domain-check [0-9.]+ [(]RDAP bootstrap [0-9-]+[)]$'
       - name: Copy the files with wrong checksums
         run: mkdir bad && cp dist/* bad/ && sed -i.bak 's/^./x/' bad/SHA256SUMS
       # The installers are tested here, on throwaway runners, because they edit the user's PATH.
