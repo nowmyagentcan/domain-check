@@ -1,0 +1,15 @@
+[package]
+name = "domain-check"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Check a domain's DNS and propagation, email security, RDAP registration, TLS certificate and HTTP headers"
+repository = "https://github.com/nowmyagentcan/domain-check"
+publish = false
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
