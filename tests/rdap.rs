@@ -107,7 +107,7 @@ fn the_registrar_fills_a_missing_expiry_and_says_when_it_has_no_record() {
     let (stub, web) = (DnsStub::new(), Web::new());
     let names = ["noexpiry.example.com", "deleting.example.com"];
     let (code, reports) = rdap(&stub, &web, &names, BOOTSTRAP);
-    assert_eq!(code, 0, "{reports:?}");
+    assert_eq!(code, 1, "{reports:?}");
     let r = &reports[0]["rdap"];
     assert_eq!(r["expires"], r["registrar_data"]["expires"]);
     assert!(r["expires"].is_string());
@@ -322,4 +322,107 @@ fn the_bootstrap_override_is_https_or_loopback_http() {
     assert_eq!(code, 3);
     let reason = reports[0]["rdap"]["reason"].as_str().unwrap();
     assert!(reason.starts_with("Couldn't reach [::1]: "), "{reason}");
+}
+
+#[test]
+fn expiry_holds_locks_and_nameservers_are_flagged() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let names = [
+        "lapsed.example.com",
+        "soon.example.com",
+        "held.example.com",
+        "deleting.example.com",
+        "nolock.uk",
+        "single.example.org",
+        "example.com",
+    ];
+    let (code, reports) = rdap(&stub, &web, &names, BOOTSTRAP);
+    assert_eq!(code, 1);
+    let day = |r: &Value| r["rdap"]["expires"].as_str().unwrap()[..10].to_string();
+    let got: Vec<_> = reports.iter().map(found).collect();
+    // Days left are whole days, counted down from the mock's "10 days from now".
+    let want: [Vec<String>; 7] = [
+        vec![
+            format!("rdap_expired: The registration expired on {}.", day(&reports[0])),
+            "rdap_no_transfer_lock: The domain has no transfer lock (client transfer prohibited).".into(),
+        ],
+        vec![format!("rdap_expiring: The registration expires in 9 days ({}).", day(&reports[1]))],
+        vec!["rdap_hold: The registration has status \"client hold\", so the domain is out of the DNS.".into()],
+        vec![
+            "rdap_pending_delete: The registration has status \"pending delete\": it is about to be deleted.".into(),
+            "rdap_no_transfer_lock: The domain has no transfer lock (client transfer prohibited).".into(),
+        ],
+        vec![],
+        vec!["ns_rdap_mismatch: The registry lists nameservers ns1.example.net, ns2.example.net, but the zone's NS records are ns1.example.net.".into()],
+        vec![],
+    ];
+    assert_eq!(got, want);
+    let hints: Vec<_> = reports[..4]
+        .iter()
+        .map(|r| r["findings"][0]["hint"].clone())
+        .collect();
+    assert_eq!(
+        hints,
+        [
+            "Renew it now at Example Registrar, Inc.; it may still be in its grace period.",
+            "Renew it, or turn on auto-renew at Example Registrar, Inc.",
+            "Contact Example Registrar, Inc.",
+            "Contact Example Registrar, Inc. at once if the domain is yours.",
+        ]
+    );
+    let severities: Vec<_> = reports[..4]
+        .iter()
+        .map(|r| r["findings"][0]["severity"].clone())
+        .collect();
+    assert_eq!(severities, ["error", "warning", "error", "error"]);
+}
+
+#[test]
+fn the_text_report_has_a_registration_line() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let dns = stub.addr();
+    let ports = web.ports(&stub);
+    let env = [
+        ("DOMAIN_CHECK_LOOPBACK_PORTS", ports.as_str()),
+        ("DOMAIN_CHECK_RDAP_BOOTSTRAP", BOOTSTRAP),
+    ];
+    let args = [
+        "example.com",
+        "gone.example.com",
+        "example.de",
+        "limited.example.com",
+    ];
+    let base = [
+        "-c",
+        "rdap",
+        "--dns",
+        &dns,
+        "--ca-file",
+        &web.ca,
+        "--allow-private",
+    ];
+    let (code, out, err) = run(&[&args[..], &base].concat(), &env);
+    assert_eq!((code, err.as_str()), (3, ""));
+    let lines: Vec<_> = out
+        .lines()
+        .filter(|l| l.starts_with("Registration "))
+        .collect();
+    assert_eq!(lines.len(), 4, "{out}");
+    let (start, end) = (
+        "Registration Example Registrar, Inc. (9999) · created ",
+        " · client delete prohibited, client transfer prohibited, client update prohibited",
+    );
+    assert!(
+        lines[0].starts_with(start) && lines[0].ends_with(end) && lines[0].contains(" · expires "),
+        "{}",
+        lines[0]
+    );
+    assert_eq!(
+        &lines[1..],
+        [
+            "Registration no registration record",
+            "Registration no RDAP service for .de",
+            "Registration rate limited: rdap.example.net limits lookups and asked us to wait 42 s.",
+        ]
+    );
 }

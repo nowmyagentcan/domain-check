@@ -16,6 +16,7 @@ use ureq::http::Response;
 use url::{Host, Url};
 
 use crate::check::{Cx, Facts, parent, within};
+use crate::dns::{self, RecordType};
 use crate::net::{self, Failed, Net};
 use crate::report::{Check, Finding, Section, Severity, Status};
 use crate::{Error, RDAP_BOOTSTRAP_JSON};
@@ -437,7 +438,11 @@ fn read(v: &Value, rdap: &mut Rdap) {
         .find_map(|l| l["href"].as_str().map(String::from));
 }
 
+/// A finding; a hint that ends on a registrar name like `Example, Inc.` keeps one period.
 fn finding(severity: Severity, code: &'static str, message: String, hint: &str) -> Finding {
+    let hint = hint
+        .strip_suffix("..")
+        .map_or(hint.to_string(), |h| format!("{h}."));
     Finding::new(Check::Rdap, severity, code, message, hint)
 }
 
@@ -536,7 +541,108 @@ pub fn run(cx: &Cx, facts: &Facts) -> (RdapSection, Vec<Finding>) {
         rdap.expires = rdap.expires.or_else(|| data.expires.clone());
         rdap.registrar_data = Some(data);
     }
-    (RdapSection::ok(rdap), Vec::new())
+    let apex = facts
+        .zone
+        .as_deref()
+        .filter(|z| rdap.queried.as_deref() == Some(*z));
+    let zone_ns = apex.and_then(|zone| nameservers(cx, zone));
+    let found = judge(&rdap, zone_ns.as_deref(), OffsetDateTime::now_utc());
+    (RdapSection::ok(rdap), found)
+}
+
+/// The zone's NS records; `None` when the lookup failed or found none.
+fn nameservers(cx: &Cx, zone: &str) -> Option<Vec<String>> {
+    let m = crate::runtime()
+        .ok()?
+        .block_on(cx.resolver.lookup(zone, RecordType::NS));
+    let m = m.ok()?;
+    let ns: Vec<_> = dns::records(&m, RecordType::NS)
+        .map(|r| dns::value(&r.data).to_ascii_lowercase())
+        .collect();
+    (!ns.is_empty()).then_some(ns)
+}
+
+/// The registration findings (spec §8.5).
+fn judge(r: &Rdap, zone_ns: Option<&[String]>, now: OffsetDateTime) -> Vec<Finding> {
+    let mut found = Vec::new();
+    if !r.found {
+        return found;
+    }
+    let registrar = r.registrar.as_ref().and_then(|g| g.name.as_deref());
+    let registrar = registrar.unwrap_or("your registrar");
+    let expires = r.expires.as_deref().unwrap_or_default();
+    if let Ok(at) = OffsetDateTime::parse(expires, &Rfc3339) {
+        let day = &expires[..10];
+        let days = (at - now).whole_days();
+        if at <= now {
+            found.push(finding(
+                Severity::Error,
+                "rdap_expired",
+                format!("The registration expired on {day}."),
+                &format!("Renew it now at {registrar}; it may still be in its grace period."),
+            ));
+        } else if days < 30 {
+            found.push(finding(
+                Severity::Warning,
+                "rdap_expiring",
+                format!("The registration expires in {days} days ({day})."),
+                &format!("Renew it, or turn on auto-renew at {registrar}."),
+            ));
+        }
+    }
+    let status = |names: &[&str]| {
+        let lower = |s: &&String| names.contains(&s.to_ascii_lowercase().as_str());
+        r.domain_status.iter().find(lower)
+    };
+    if let Some(s) = status(&["client hold", "server hold"]) {
+        found.push(finding(
+            Severity::Error,
+            "rdap_hold",
+            format!("The registration has status \"{s}\", so the domain is out of the DNS."),
+            &format!("Contact {registrar}."),
+        ));
+    }
+    if let Some(s) = status(&["redemption period", "pending delete", "pending restore"]) {
+        found.push(finding(
+            Severity::Error,
+            "rdap_pending_delete",
+            format!("The registration has status \"{s}\": it is about to be deleted."),
+            &format!("Contact {registrar} at once if the domain is yours."),
+        ));
+    }
+    let tld = r.queried.as_deref().and_then(|q| q.rsplit('.').next());
+    if tld.is_some_and(|t| t.len() > 2) && status(&["client transfer prohibited"]).is_none() {
+        found.push(finding(
+            Severity::Info,
+            "rdap_no_transfer_lock",
+            "The domain has no transfer lock (client transfer prohibited).".into(),
+            "Turn on the registrar lock to block unauthorised transfers.",
+        ));
+    }
+    if let Some(zone) = zone_ns
+        && !r.nameservers.is_empty()
+    {
+        let sorted = |list: &[String]| {
+            let mut list = list.to_vec();
+            list.sort();
+            list.dedup();
+            list
+        };
+        let (listed, zone) = (sorted(&r.nameservers), sorted(zone));
+        if listed != zone {
+            found.push(finding(
+                Severity::Warning,
+                "ns_rdap_mismatch",
+                format!(
+                    "The registry lists nameservers {}, but the zone's NS records are {}.",
+                    listed.join(", "),
+                    zone.join(", ")
+                ),
+                "Make them the same at your registrar and DNS host.",
+            ));
+        }
+    }
+    found
 }
 
 /// One GET of the registrar's record, without a retry.
@@ -605,6 +711,90 @@ mod tests {
         assert!(!ok("http://rdap.example.net/"));
         assert!(!ok("http://192.0.2.1/"));
         assert!(!ok("ftp://127.0.0.1/"));
+    }
+
+    #[test]
+    fn registrations_are_judged_by_expiry_status_and_nameservers() {
+        let now = OffsetDateTime::parse("2026-10-31T12:00:00Z", &Rfc3339).unwrap();
+        let record = |expires: &str, status: &[&str]| Rdap {
+            found: true,
+            queried: Some("example.com".into()),
+            expires: Some(expires.into()),
+            domain_status: status.iter().map(|s| s.to_string()).collect(),
+            nameservers: vec!["ns2.example.net".into(), "ns1.example.net".into()],
+            registrar: Some(Registrar {
+                name: Some("Example Registrar".into()),
+                iana_id: None,
+                rdap: None,
+            }),
+            ..Rdap::default()
+        };
+        let codes = |r: &Rdap, ns: Option<&[String]>| {
+            let found = judge(r, ns, now);
+            found
+                .iter()
+                .map(|f| format!("{} {}", f.code, f.message))
+                .collect::<Vec<_>>()
+        };
+        let locked = ["client transfer prohibited"];
+        assert_eq!(
+            codes(&record("2027-10-31T00:00:00Z", &locked), None),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            codes(&record("2026-11-30T11:59:59Z", &locked), None),
+            ["rdap_expiring The registration expires in 29 days (2026-11-30)."]
+        );
+        assert_eq!(
+            codes(&record("2026-11-30T12:00:00Z", &locked), None),
+            Vec::<String>::new()
+        );
+        let expired = judge(&record("2026-10-31T12:00:00Z", &locked), None, now);
+        assert_eq!(
+            (
+                expired[0].code,
+                expired[0].message.as_str(),
+                expired[0].hint.as_deref()
+            ),
+            (
+                "rdap_expired",
+                "The registration expired on 2026-10-31.",
+                Some("Renew it now at Example Registrar; it may still be in its grace period.")
+            )
+        );
+        assert_eq!(
+            codes(
+                &record(
+                    "2027-10-31T00:00:00Z",
+                    &["Server Hold", "redemption period"]
+                ),
+                None
+            ),
+            [
+                "rdap_hold The registration has status \"Server Hold\", so the domain is out of the DNS.",
+                "rdap_pending_delete The registration has status \"redemption period\": it is about to be deleted.",
+                "rdap_no_transfer_lock The domain has no transfer lock (client transfer prohibited).",
+            ]
+        );
+        let mut uk = record("2027-10-31T00:00:00Z", &[]);
+        uk.queried = Some("example.uk".into());
+        assert_eq!(codes(&uk, None), Vec::<String>::new());
+        let zone = ["ns1.example.net".to_string(), "ns2.example.net".to_string()];
+        let same = record("2027-10-31T00:00:00Z", &locked);
+        assert_eq!(codes(&same, Some(&zone)), Vec::<String>::new());
+        assert_eq!(
+            codes(&same, Some(&zone[..1])),
+            [
+                "ns_rdap_mismatch The registry lists nameservers ns1.example.net, ns2.example.net, but the zone's NS records are ns1.example.net."
+            ]
+        );
+        let mut unknown = record("2026-10-01T00:00:00Z", &locked);
+        unknown.registrar = None;
+        assert_eq!(
+            judge(&unknown, None, now)[0].hint.as_deref(),
+            Some("Renew it now at your registrar; it may still be in its grace period.")
+        );
+        assert_eq!(judge(&Rdap::default(), Some(&zone), now), Vec::new());
     }
 
     #[test]
