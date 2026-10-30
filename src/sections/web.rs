@@ -56,8 +56,9 @@ fn finding(severity: Severity, code: &'static str, message: String, hint: &str) 
     Finding::new(Check::Http, severity, code, message, hint)
 }
 
-/// The chain from `start`, one hop per GET.
-fn follow(net: &Net, start: &str, until: Instant) -> (Chain, End) {
+/// The chain from `start`, one hop per GET; `tls` when the tls check reports the first
+/// connection's certificate.
+fn follow(net: &Net, start: &str, until: Instant, tls: bool) -> (Chain, End) {
     let mut chain = Chain {
         start: start.to_string(),
         ..Chain::default()
@@ -70,10 +71,10 @@ fn follow(net: &Net, start: &str, until: Instant) -> (Chain, End) {
             Ok(r) => r,
             Err(f) => {
                 chain.error = Some(match (&f, chain.hops.is_empty()) {
-                    (Failed::Certificate(_), true) => {
+                    (Failed::Certificate(_), true) if tls => {
                         "Certificate not trusted; see Certificate.".into()
                     }
-                    (Failed::Certificate(_), false) => format!(
+                    (Failed::Certificate(_), _) => format!(
                         "the certificate of {} isn't trusted",
                         url.host_str().unwrap_or_default()
                     ),
@@ -293,8 +294,8 @@ pub fn run(cx: &Cx, facts: &Facts) -> (Section<Web>, Vec<Finding>) {
     let until = cx.until(Check::Http);
     let net = &cx.net;
     let ((http, http_end), (https, https_end)) = std::thread::scope(|s| {
-        let plain = s.spawn(|| follow(net, &format!("http://{d}/"), until));
-        let secure = follow(net, &format!("https://{d}/"), until);
+        let plain = s.spawn(|| follow(net, &format!("http://{d}/"), until, cx.tls));
+        let secure = follow(net, &format!("https://{d}/"), until, cx.tls);
         let plain = plain
             .join()
             .unwrap_or_else(|e| std::panic::resume_unwind(e));
@@ -361,8 +362,8 @@ pub fn run(cx: &Cx, facts: &Facts) -> (Section<Web>, Vec<Finding>) {
         ));
     }
     if let End::Failed(f) = &https_end {
-        // The first connection is the certificate check's to report.
-        let first_hop = https.hops.is_empty();
+        // The first connection is the certificate check's to report, when it runs.
+        let first_hop = https.hops.is_empty() && cx.tls;
         let theirs = matches!(
             f,
             Failed::Connect(_) | Failed::Certificate(_) | Failed::Tls(_)

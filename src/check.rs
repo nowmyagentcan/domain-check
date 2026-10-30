@@ -100,6 +100,8 @@ pub struct Cx {
     pub types: Vec<RecordType>,
     pub selectors: Vec<String>,
     pub spf_ip: Option<IpAddr>,
+    /// The tls check runs too, so the first https connection is its to report.
+    pub tls: bool,
     pub rdap: Arc<rdap::Run>,
     /// When the domain's check began: every section's budget counts from here.
     pub started: Instant,
@@ -367,6 +369,7 @@ fn checked(
         types: o.types.clone(),
         selectors: o.selectors.clone(),
         spf_ip: o.spf_ip,
+        tls: o.checks.contains(&Check::Tls),
         rdap,
         started: start,
     });

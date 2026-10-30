@@ -159,19 +159,39 @@ fn what_the_chains_end_with_is_reported() {
     let (_, r) = allowed(&stub, &web, "closed.example.com");
     assert_eq!(
         found(&r),
-        ["http_unavailable: Nothing answers on port 80 (connection refused)."]
+        [
+            "https_failed: Couldn't load https://closed.example.com/: connection refused.",
+            "http_unavailable: Nothing answers on port 80 (connection refused)."
+        ]
     );
     assert_eq!(r["http"]["https"]["error"], "connection refused");
     let (_, r) = allowed(&stub, &web, "garbage.example.com");
     let want = "https_failed: Couldn't load https://garbage.example.com/: the answer isn't HTTP.";
     assert!(found(&r).contains(&want.to_string()), "{:?}", found(&r));
-    let (_, r) = allowed(&stub, &web, "selfsigned.example.com");
+    // With the tls check the first connection is its finding, not a second one here.
+    let both = ["--allow-private", "-c", "tls"];
+    let (_, r) = http(&stub, &web, "selfsigned.example.com", &both);
     assert_eq!(
         r["http"]["https"]["error"],
         "Certificate not trusted; see Certificate."
     );
-    let want = "http_no_https_redirect: http://selfsigned.example.com/ doesn't redirect to HTTPS (it answers 200).";
-    assert_eq!(found(&r), [want]);
+    let http_found: Vec<_> = r["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["check"] == "http")
+        .collect();
+    let want = "doesn't redirect to HTTPS (it answers 200).";
+    assert!(
+        http_found.len() == 1 && http_found[0]["message"].as_str().unwrap().ends_with(want),
+        "{http_found:?}"
+    );
+    let (_, r) = http(&stub, &web, "closed.example.com", &both);
+    assert!(
+        !found(&r).iter().any(|f| f.starts_with("https_failed")),
+        "{:?}",
+        found(&r)
+    );
 }
 
 #[test]
@@ -319,7 +339,6 @@ fn headers_of_the_last_https_answer_are_graded() {
 }
 
 #[test]
-#[ignore = "known bug: DC01"]
 fn https_that_fails_is_a_finding_without_the_tls_check() {
     let (stub, web) = (DnsStub::new(), Web::new());
     for domain in [
@@ -329,7 +348,8 @@ fn https_that_fails_is_a_finding_without_the_tls_check() {
         "closed.example.com",
     ] {
         let (_, r) = allowed(&stub, &web, domain);
-        assert!(r["http"]["https"]["error"].is_string(), "{}", r["http"]);
+        let error = r["http"]["https"]["error"].as_str().unwrap();
+        assert!(!error.contains("see Certificate"), "{error}");
         // tls isn't requested, so only http can tell the user that https doesn't load or
         // isn't served at all.
         let findings = r["findings"].as_array().unwrap();
