@@ -363,6 +363,15 @@ pub const MAIL: &[(&str, RecordType, &str)] = {
         ("ten.example.com", A, "10.0.0.1"),
         ("ula.example.com", AAAA, "fc00::1"),
         ("mapped.example.com", AAAA, "::ffff:127.0.0.1"),
+        // Web: tests/common/web.rs route() says what each site answers
+        ("web.example.com", A, "127.0.0.1"),
+        ("relative.example.com", A, "127.0.0.1"),
+        ("schemerel.example.com", A, "127.0.0.1"),
+        ("circle.example.com", A, "127.0.0.1"),
+        ("far.example.com", A, "127.0.0.1"),
+        ("endless.example.com", A, "127.0.0.1"),
+        ("status.example.com", A, "127.0.0.1"),
+        ("garbage.example.com", A, "127.0.0.1"),
     ]
 };
 

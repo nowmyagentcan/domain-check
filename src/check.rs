@@ -20,10 +20,17 @@ use crate::sections::dns::Dns;
 use crate::sections::email::Email;
 use crate::sections::propagation::Propagation;
 use crate::sections::tls::Tls;
+use crate::sections::web::Web;
 use crate::{Error, Ports, sections};
 
 /// The checks this version runs, in report order.
-pub const CHECKS: [Check; 4] = [Check::Dns, Check::Propagation, Check::Email, Check::Tls];
+pub const CHECKS: [Check; 5] = [
+    Check::Dns,
+    Check::Propagation,
+    Check::Email,
+    Check::Tls,
+    Check::Http,
+];
 
 pub struct Options {
     pub checks: Vec<Check>,
@@ -314,6 +321,7 @@ enum Part {
     Propagation(Section<Propagation>),
     Email(Box<Section<Email>>),
     Tls(Box<Section<Tls>>),
+    Http(Box<Section<Web>>),
     Down(Status, String),
 }
 
@@ -364,6 +372,7 @@ fn checked(d: &Domain, net: Arc<Net>, o: &Options, progress: &mut Progress) -> C
             Part::Propagation(s) => sections.propagation = Some(s),
             Part::Email(s) => sections.email = Some(*s),
             Part::Tls(s) => sections.tls = Some(*s),
+            Part::Http(s) => sections.http = Some(*s),
             Part::Down(status, why) => sections.not(outcome.check, status, &why),
         }
         findings.extend(outcome.findings);
@@ -416,6 +425,10 @@ fn section(check: Check, cx: &Cx, facts: &Facts) -> Outcome {
             let (s, f) = sections::tls::run(cx, facts);
             (Part::Tls(Box::new(s)), f)
         }
+        Check::Http => {
+            let (s, f) = sections::web::run(cx, facts);
+            (Part::Http(Box::new(s)), f)
+        }
         _ => (
             Part::Down(Status::Skipped, "not requested".into()),
             Vec::new(),
@@ -459,6 +472,7 @@ fn collect(
                     Part::Propagation(s) => s.status,
                     Part::Email(s) => s.status,
                     Part::Tls(s) => s.status,
+                    Part::Http(s) => s.status,
                     Part::Down(status, _) => *status,
                 });
                 let mark = match status {
@@ -513,7 +527,10 @@ mod tests {
             (e.code, e.message.as_str()),
             ("usage", "Unknown check 'smtp'.")
         );
-        assert_eq!(e.hint.unwrap(), "Use dns, propagation, email, tls or all.");
+        assert_eq!(
+            e.hint.unwrap(),
+            "Use dns, propagation, email, tls, http or all."
+        );
     }
 
     #[test]

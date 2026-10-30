@@ -46,9 +46,41 @@ impl Reply {
     }
 }
 
-/// The answer to `path` on `host`.
-pub fn route(_host: &str, _path: &str, _https: bool) -> Reply {
-    Reply::new(200, &[("Content-Type", "text/plain")], "ok\n")
+/// The answer to `path` on `host`: the first label of the host picks the site. Status 0 sends
+/// bytes that aren't HTTP.
+pub fn route(host: &str, path: &str, https: bool) -> Reply {
+    let to = |status, location: &str| Reply::new(status, &[("Location", location)], "");
+    let site = host.split('.').next().unwrap_or_default();
+    match (site, https, path) {
+        ("web", false, _) => Reply::new(
+            301,
+            &[
+                ("Location", "https://web.example.com/"),
+                ("Strict-Transport-Security", "max-age=63072000"),
+            ],
+            "",
+        ),
+        ("relative", false, "/") => to(302, "/next"),
+        ("relative", false, "/next") => to(301, "https://relative.example.com/"),
+        ("schemerel", false, _) => to(301, "//web.example.com/x"),
+        ("circle", false, "/") => to(301, "/a"),
+        ("circle", false, "/a") => to(301, "/b"),
+        ("circle", false, _) => to(301, "/a"),
+        ("circle", true, _) => to(302, "https://circle.example.com/"),
+        ("far", _, p) => {
+            let n: u32 = p.trim_start_matches('/').parse().unwrap_or(0);
+            to(301, &format!("/{}", n + 1))
+        }
+        ("endless", false, _) => to(301, "https://endless.example.com/"),
+        ("endless", true, _) => Reply {
+            body: None,
+            ..Reply::new(200, &[("Content-Type", "text/plain")], "")
+        },
+        ("status", true, "/") => to(301, "/missing"),
+        ("status", true, _) => Reply::new(404, &[], "not found\n"),
+        ("garbage", true, _) => Reply::new(0, &[], ""),
+        _ => Reply::new(200, &[("Content-Type", "text/plain")], "ok\n"),
+    }
 }
 
 pub struct Web {
@@ -165,6 +197,10 @@ fn serve(stream: &mut (impl Read + Write), https: bool, hits: &Mutex<Vec<Hit>>) 
         path: path.to_string(),
     });
     let reply = route(&host, path, https);
+    if reply.status == 0 {
+        let _ = stream.write_all(b"this is not http\r\n\r\n");
+        return;
+    }
     let mut out = format!("HTTP/1.1 {} Mock\r\nConnection: close\r\n", reply.status);
     for (name, value) in &reply.headers {
         out += &format!("{name}: {value}\r\n");

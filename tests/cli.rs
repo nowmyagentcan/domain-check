@@ -468,10 +468,10 @@ fn a_silent_resolver_makes_every_section_unavailable_quickly() {
         (&j!("unavailable"), &j!(reason))
     );
     let reason = j!("No DNS answer, so this check couldn't run.");
-    for s in ["propagation", "email", "tls"] {
+    for s in ["propagation", "email", "tls", "http"] {
         assert_eq!(r[s]["reason"], reason, "{s}");
     }
-    assert_eq!(v["summary"]["unavailable"], 4);
+    assert_eq!(v["summary"]["unavailable"], 5);
 }
 
 /// The text report, with each `checked HH:MM UTC` turned into `checked T`.
@@ -504,6 +504,7 @@ DNS          A 192.0.2.10 · AAAA 2001:db8::10 · MX 20 mx2.example.net, 10 mx1.
 Propagation  consistent: 2 nameserver addresses, 2 resolvers agree on A, AAAA, MX, TXT
 Email        skipped: not requested
 Certificate  skipped: not requested
+Web          skipped: not requested
 ";
     assert_eq!(out, want);
 
@@ -525,6 +526,7 @@ DNS          A 192.0.2.10 · AAAA 2001:db8::10 · MX 20 mx2.example.net, 10 mx1.
 Propagation  skipped: not requested
 Email        skipped: not requested
 Certificate  skipped: not requested
+Web          skipped: not requested
 
 ✗ printer.test  printer.test is a special-use name (RFC 6761); it never resolves on the public internet.
                 Use domain-check lookup to ask your own resolver about it.
@@ -537,6 +539,7 @@ DNS          doesn't exist (NXDOMAIN)
 Propagation  skipped: not requested
 Email        skipped: not requested
 Certificate  skipped: not requested
+Web          skipped: not requested
 
 3 domains: 2 with errors, 1 clean
 ";
@@ -559,6 +562,7 @@ DNS          A 192.0.2.30 · NS ns1.example.net, ns2.example.net · DNSSEC unsig
 Propagation  consistent: 1 nameserver addresses, 2 resolvers agree on A · 1 nameserver address didn't answer
 Email        skipped: not requested
 Certificate  skipped: not requested
+Web          skipped: not requested
 ";
     assert_eq!(out, want);
 
@@ -573,6 +577,7 @@ DNS          unavailable: Couldn't reach the DNS resolver {}: timeout.
 Propagation  unavailable: No DNS answer, so this check couldn't run.
 Email        skipped: not requested
 Certificate  skipped: not requested
+Web          skipped: not requested
 ",
         silent.addr()
     );

@@ -18,7 +18,8 @@ const SENTENCE: &str =
 const USAGE: &str = "domain-check [check] <DOMAIN>... [OPTIONS]
        domain-check <COMMAND>";
 
-const AFTER_HELP: &str = "Checks: dns, propagation, email, tls (certificate).
+const AFTER_HELP: &str =
+    "Checks: dns, propagation, email, tls (certificate), http (redirects and headers).
 Only ports 53, 80 and 443 are contacted; nothing is stored.
 
 \x1b[1;4mEnvironment:\x1b[0m
@@ -67,7 +68,7 @@ struct CheckArgs {
     /// a domain, URL or email address
     #[arg(value_name = "DOMAIN")]
     domains: Vec<String>,
-    /// sections to run: dns, propagation, email, tls or all
+    /// sections to run: dns, propagation, email, tls, http or all
     #[arg(
         short,
         long,

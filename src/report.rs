@@ -9,6 +9,7 @@ use crate::sections::dns::Dns;
 use crate::sections::email::Email;
 use crate::sections::propagation::Propagation;
 use crate::sections::tls::Tls;
+use crate::sections::web::Web;
 use crate::{Error, RDAP_BOOTSTRAP};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -191,6 +192,7 @@ pub struct Sections {
     pub propagation: Option<Section<Propagation>>,
     pub email: Option<Section<Email>>,
     pub tls: Option<Section<Tls>>,
+    pub http: Option<Section<Web>>,
 }
 
 impl Sections {
@@ -201,7 +203,8 @@ impl Sections {
             Check::Propagation => self.propagation = Some(Section::not(status, reason)),
             Check::Email => self.email = Some(Section::not(status, reason)),
             Check::Tls => self.tls = Some(Section::not(status, reason)),
-            Check::Rdap | Check::Http => {}
+            Check::Http => self.http = Some(Section::not(status, reason)),
+            Check::Rdap => {}
         }
     }
 
@@ -212,6 +215,7 @@ impl Sections {
             self.propagation.as_ref().map(|s| s.status),
             self.email.as_ref().map(|s| s.status),
             self.tls.as_ref().map(|s| s.status),
+            self.http.as_ref().map(|s| s.status),
         ];
         statuses
             .into_iter()
@@ -456,7 +460,8 @@ mod tests {
                         "dns": null,
                         "propagation": null,
                         "email": null,
-                        "tls": null
+                        "tls": null,
+                        "http": null
                     },
                     {
                         "input": "",
@@ -472,7 +477,8 @@ mod tests {
                         "dns": null,
                         "propagation": null,
                         "email": null,
-                        "tls": null
+                        "tls": null,
+                        "http": null
                     }
                 ],
                 "summary": { "domains": 2, "errors": 1, "warnings": 0, "info": 0, "unavailable": 0 },

@@ -95,6 +95,8 @@ pub enum Failed {
     Private { host: String, address: IpAddr },
     /// The server's certificate didn't verify.
     Certificate(String),
+    /// The TLS handshake failed for another reason.
+    Tls(String),
     /// No connection was made: no address, refused, unreachable, timed out.
     Connect(String),
     /// Connected, then something else went wrong.
@@ -107,9 +109,10 @@ impl fmt::Display for Failed {
             Failed::Private { host, address } => {
                 write!(f, "{host} resolves to {address}, a private address")
             }
-            Failed::Certificate(why) | Failed::Connect(why) | Failed::Other(why) => {
-                f.write_str(why)
-            }
+            Failed::Certificate(why)
+            | Failed::Tls(why)
+            | Failed::Connect(why)
+            | Failed::Other(why) => f.write_str(why),
         }
     }
 }
@@ -139,7 +142,7 @@ impl Failed {
     pub fn from_tls(e: &rustls::Error) -> Failed {
         match e {
             rustls::Error::InvalidCertificate(c) => Failed::Certificate(format!("{c:?}")),
-            e => Failed::Other(e.to_string()),
+            e => Failed::Tls(e.to_string()),
         }
     }
 
@@ -151,6 +154,7 @@ impl Failed {
                 Failed::Connect("timeout".into())
             }
             ureq::Error::Timeout(_) => Failed::Other("timeout".into()),
+            ureq::Error::Protocol(_) => Failed::Other("the answer isn't HTTP".into()),
             e => Failed::Other(e.to_string()),
         }
     }

@@ -10,6 +10,7 @@ use crate::sections::dns::Dns;
 use crate::sections::email::Email;
 use crate::sections::propagation::Propagation;
 use crate::sections::tls::Tls;
+use crate::sections::web::{Chain, Web};
 
 fn paint(code: &str, s: &str) -> String {
     format!("\x1b[{code}m{s}\x1b[0m")
@@ -131,6 +132,7 @@ pub fn report(r: &Report) -> String {
             .map(|x| (Check::Propagation, line(x, propagation))),
         s.email.as_ref().map(|x| (Check::Email, line(x, email))),
         s.tls.as_ref().map(|x| (Check::Tls, line(x, tls))),
+        s.http.as_ref().map(|x| (Check::Http, line(x, web))),
     ];
     for (check, line) in lines.into_iter().flatten() {
         out += &format!("{}{line}\n", bold(&format!("{:13}", check.title())));
@@ -355,6 +357,29 @@ fn tls(t: &Tls) -> String {
         None => "trusted".into(),
         Some(e) => format!("not trusted: {}", e.replace('_', " ")),
     });
+    parts.join(" · ")
+}
+
+/// `http → 301 https://example.com/ → 200`: each hop's status and where it points.
+fn chain(scheme: &str, c: &Chain) -> String {
+    let mut out = scheme.to_string();
+    for hop in &c.hops {
+        out += &format!(" → {}", hop.status);
+        if let Some(to) = &hop.location {
+            out += &format!(" {to}");
+        }
+    }
+    if let Some(why) = &c.error {
+        out += &format!(" → {why}");
+    }
+    out
+}
+
+fn web(w: &Web) -> String {
+    let mut parts = vec![chain("http", &w.http)];
+    if w.https.hops.len() != 1 || w.https.error.is_some() {
+        parts.push(chain("https", &w.https));
+    }
     parts.join(" · ")
 }
 

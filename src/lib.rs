@@ -11,6 +11,7 @@ pub mod sections {
     pub mod email;
     pub mod propagation;
     pub mod tls;
+    pub mod web;
 }
 pub mod text;
 
