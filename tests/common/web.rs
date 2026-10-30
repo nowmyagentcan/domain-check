@@ -170,7 +170,7 @@ fn registry(name: &str, nth: usize) -> Reply {
             &["client hold", "client transfer prohibited"],
             false,
         ),
-        "deleting.example.com" => record(Some(300), &["pending delete"], false),
+        "deleting.example.com" => record(Some(300), &["pending delete"], true),
         "noexpiry.example.com" => record(None, &lock, true),
         "nolock.uk" => record(Some(300), &[], false),
         _ => rdap_json(404, json!({ "errorCode": 404, "title": "Not Found" })),

@@ -2,6 +2,7 @@
 //! found through IANA's bootstrap file (RFC 9224), starting at the zone apex instead of
 //! guessing the registered name from a suffix list.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -29,6 +30,8 @@ const REDIRECTS: usize = 3;
 const RETRY: Duration = Duration::from_secs(2);
 const TIMEOUT: Duration = Duration::from_secs(15);
 const LIMIT: u64 = 1 << 20;
+/// The least time between requests to one host (the registries' terms forbid bulk lookups).
+const PACE: Duration = Duration::from_secs(1);
 
 /// The section, with the wait a rate-limiting server asked for next to its status.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -163,12 +166,14 @@ fn pick(urls: &[String]) -> Option<String> {
 
 type File = Result<Arc<Bootstrap>, String>;
 
-/// What the domains of one run share: the bootstrap files, each read at most once.
+/// What the domains of one run share: the bootstrap files, each read at most once, and when
+/// each RDAP host last answered.
 pub struct Run {
     /// `DOMAIN_CHECK_RDAP_BOOTSTRAP`, standing in for the bundled file and the live one.
     url: Option<String>,
     first: Mutex<Option<File>>,
     live: Mutex<Option<File>>,
+    last: Mutex<HashMap<String, Instant>>,
 }
 
 impl Run {
@@ -177,6 +182,7 @@ impl Run {
             url,
             first: Mutex::new(None),
             live: Mutex::new(None),
+            last: Mutex::new(HashMap::new()),
         }
     }
 
@@ -190,7 +196,7 @@ impl Run {
                 b.label = format!("bundled {}", b.publication.get(..10).unwrap_or_default());
                 Ok(Arc::new(b))
             }
-            Some(url) => fetch(net, url, until, "override"),
+            Some(url) => self.fetch(net, url, until, "override"),
         };
         slot.get_or_insert_with(read).clone()
     }
@@ -199,23 +205,87 @@ impl Run {
     fn live(&self, net: &Net, until: Instant) -> File {
         let mut slot = self.live.lock().unwrap_or_else(|e| e.into_inner());
         let url = self.url.as_deref().unwrap_or(LIVE);
-        slot.get_or_insert_with(|| fetch(net, url, until, "live"))
+        slot.get_or_insert_with(|| self.fetch(net, url, until, "live"))
             .clone()
     }
-}
 
-fn fetch(net: &Net, url: &str, until: Instant, label: &str) -> File {
-    let host = host(url);
-    match get(net, url, "application/json", until, &mut 1, false) {
-        Got::Json(v) => {
-            let mut b: Bootstrap = serde_json::from_value(v).map_err(|_| unreadable(&host))?;
-            b.label = match label {
-                "live" => "live".into(),
-                _ => format!("{label} {}", b.publication.get(..10).unwrap_or_default()),
-            };
-            Ok(Arc::new(b))
+    fn fetch(&self, net: &Net, url: &str, until: Instant, label: &str) -> File {
+        let host = host(url);
+        match self.get(net, url, "application/json", until, &mut 1, false) {
+            Got::Json(v) => {
+                let mut b: Bootstrap = serde_json::from_value(v).map_err(|_| unreadable(&host))?;
+                b.label = match label {
+                    "live" => "live".into(),
+                    _ => format!("{label} {}", b.publication.get(..10).unwrap_or_default()),
+                };
+                Ok(Arc::new(b))
+            }
+            got => Err(got.why(&host)),
         }
-        got => Err(got.why(&host)),
+    }
+
+    /// One GET with its redirects (at most 3, to usable URLs) and, when `retry` is set, one
+    /// more try 2 s after a 5xx or a failed connection. Every request takes one of `left` and
+    /// starts at least 1 s after the last answer from its host.
+    fn get(
+        &self,
+        net: &Net,
+        start: &str,
+        accept: &str,
+        until: Instant,
+        left: &mut usize,
+        retry: bool,
+    ) -> Got {
+        let mut url = start.to_string();
+        let (mut redirects, mut retry) = (0, retry);
+        loop {
+            *left = left.saturating_sub(1);
+            let host = host(&url);
+            let answered = |status| Got::Down(format!("{host} answered HTTP {status}."), None);
+            let last = self
+                .last
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&host)
+                .copied();
+            if let Some(at) = last {
+                thread::sleep(PACE.saturating_sub(at.elapsed()));
+            }
+            let response = net.get_as(&url, until, accept, TIMEOUT);
+            let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+            last.insert(host.clone(), Instant::now());
+            drop(last);
+            let got = match response {
+                Err(f) => Got::Down(format!("Couldn't reach {host}: {f}."), Some(f)),
+                Ok(mut r) => match r.status().as_u16() {
+                    200 => return json(&mut r, &host),
+                    404 => return Got::NotFound,
+                    429 => {
+                        let after = header(&r, "retry-after").and_then(|v| v.parse().ok());
+                        return Got::Limited(after);
+                    }
+                    status @ (301 | 302 | 303 | 307 | 308) => {
+                        let base = Url::parse(&url).ok();
+                        let next = header(&r, "location").and_then(|l| base?.join(&l).ok());
+                        match next.filter(usable) {
+                            Some(next) if redirects < REDIRECTS && *left > 0 => {
+                                (url, redirects) = (next.to_string(), redirects + 1);
+                                continue;
+                            }
+                            _ => return answered(status),
+                        }
+                    }
+                    status @ 500.. => answered(status),
+                    status => return answered(status),
+                },
+            };
+            let private = matches!(got, Got::Down(_, Some(Failed::Private { .. })));
+            if !retry || private || *left == 0 || Instant::now() + RETRY >= until {
+                return got;
+            }
+            retry = false;
+            thread::sleep(RETRY);
+        }
     }
 }
 
@@ -248,45 +318,6 @@ fn limited(host: &str, after: Option<u64>) -> String {
     match after {
         Some(n) => format!("{host} limits lookups and asked us to wait {n} s."),
         None => format!("{host} limits lookups; try again later."),
-    }
-}
-
-/// One GET with its redirects (at most 3, to usable URLs) and, when `retry` is set, one more
-/// try 2 s after a 5xx or a failed connection. Every request takes one of `left`.
-fn get(net: &Net, start: &str, accept: &str, until: Instant, left: &mut usize, retry: bool) -> Got {
-    let mut url = start.to_string();
-    let (mut redirects, mut retry) = (0, retry);
-    loop {
-        *left = left.saturating_sub(1);
-        let host = host(&url);
-        let answered = |status| Got::Down(format!("{host} answered HTTP {status}."), None);
-        let got = match net.get_as(&url, until, accept, TIMEOUT) {
-            Err(f) => Got::Down(format!("Couldn't reach {host}: {f}."), Some(f)),
-            Ok(mut r) => match r.status().as_u16() {
-                200 => return json(&mut r, &host),
-                404 => return Got::NotFound,
-                429 => return Got::Limited(header(&r, "retry-after").and_then(|v| v.parse().ok())),
-                status @ (301 | 302 | 303 | 307 | 308) => {
-                    let base = Url::parse(&url).ok();
-                    let next = header(&r, "location").and_then(|l| base?.join(&l).ok());
-                    match next.filter(usable) {
-                        Some(next) if redirects < REDIRECTS && *left > 0 => {
-                            (url, redirects) = (next.to_string(), redirects + 1);
-                            continue;
-                        }
-                        _ => return answered(status),
-                    }
-                }
-                status @ 500.. => answered(status),
-                status => return answered(status),
-            },
-        };
-        let private = matches!(got, Got::Down(_, Some(Failed::Private { .. })));
-        if !retry || private || *left == 0 || Instant::now() + RETRY >= until {
-            return got;
-        }
-        retry = false;
-        thread::sleep(RETRY);
     }
 }
 
@@ -334,6 +365,29 @@ fn event(v: &Value, action: &str) -> Option<String> {
     date(e["eventDate"].as_str()?)
 }
 
+/// The registrar's own RDAP record of the domain: the top-level `related` link, an RDAP one
+/// first (RFC 9083 §4.2; ICANN gTLD response profile 2.2 §2.2).
+fn related(v: &Value) -> Option<String> {
+    let links: Vec<&Value> = v["links"]
+        .as_array()?
+        .iter()
+        .filter(|l| l["rel"] == "related")
+        .collect();
+    let href = |l: &&Value| l["href"].as_str().map(String::from);
+    let rdap = links
+        .iter()
+        .filter(|l| l["type"] == RDAP_JSON)
+        .find_map(href);
+    let any = || {
+        links
+            .iter()
+            .filter_map(href)
+            .find(|h| h.contains("/domain/"))
+    };
+    rdap.or_else(any)
+        .filter(|h| Url::parse(h).is_ok_and(|u| usable(&u)))
+}
+
 /// The registrar entity's name (vCard `fn`) and IANA ID.
 fn registrar(v: &Value) -> Option<Registrar> {
     let entities = v["entities"].as_array()?;
@@ -360,7 +414,15 @@ fn read(v: &Value, rdap: &mut Rdap) {
     rdap.created = event(v, "registration");
     rdap.expires = event(v, "expiration");
     rdap.updated = event(v, "last changed");
-    rdap.registrar = registrar(v);
+    rdap.registrar = match (registrar(v), related(v)) {
+        (Some(r), link) => Some(Registrar { rdap: link, ..r }),
+        (None, Some(link)) => Some(Registrar {
+            name: None,
+            iana_id: None,
+            rdap: Some(link),
+        }),
+        (None, None) => None,
+    };
     rdap.domain_status = strings(&v["status"]);
     let servers = v["nameservers"].as_array().into_iter().flatten();
     rdap.nameservers = servers
@@ -421,7 +483,7 @@ pub fn run(cx: &Cx, facts: &Facts) -> (RdapSection, Vec<Finding>) {
     let mut left = REGISTRY_REQUESTS;
     let record = loop {
         let url = format!("{}/domain/{name}", base.trim_end_matches('/'));
-        match get(net, &url, RDAP_JSON, until, &mut left, true) {
+        match cx.rdap.get(net, &url, RDAP_JSON, until, &mut left, true) {
             Got::Json(v) => break v,
             Got::NotFound if exists && left > 0 && name.matches('.').count() >= 2 => {
                 name = parent(&name).unwrap_or_default().to_string();
@@ -467,7 +529,36 @@ pub fn run(cx: &Cx, facts: &Facts) -> (RdapSection, Vec<Finding>) {
         ..Rdap::default()
     };
     read(&record, &mut rdap);
+    let link = rdap.registrar.as_ref().and_then(|r| r.rdap.clone());
+    if let Some(link) = link {
+        let data = registrar_data(cx, &link, until);
+        // The registry's dates win; the registrar's expiry fills a gap.
+        rdap.expires = rdap.expires.or_else(|| data.expires.clone());
+        rdap.registrar_data = Some(data);
+    }
     (RdapSection::ok(rdap), Vec::new())
+}
+
+/// One GET of the registrar's record, without a retry.
+fn registrar_data(cx: &Cx, link: &str, until: Instant) -> RegistrarData {
+    let server =
+        Url::parse(link).map_or(link.to_string(), |u| u.origin().ascii_serialization() + "/");
+    let mut data = RegistrarData {
+        server,
+        status: "ok",
+        expires: None,
+        updated: None,
+    };
+    match cx.rdap.get(&cx.net, link, RDAP_JSON, until, &mut 1, false) {
+        Got::Json(v) => {
+            data.expires = event(&v, "expiration");
+            data.updated = event(&v, "last changed");
+        }
+        Got::NotFound => data.status = "not_found",
+        Got::Limited(_) => data.status = "rate_limited",
+        Got::Down(..) => data.status = "unavailable",
+    }
+    data
 }
 
 #[cfg(test)]

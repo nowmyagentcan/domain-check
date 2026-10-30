@@ -68,23 +68,73 @@ fn the_registry_from_the_bootstrap_answers_for_the_zone_apex() {
         assert!(at.len() == 20 && at.ends_with('Z'), "{key} {at}");
     }
     let mut fields = r.clone();
-    for key in ["created", "expires", "updated", "registrar_data"] {
+    for key in ["created", "expires", "updated"] {
         fields.as_object_mut().unwrap().remove(key);
     }
+    let theirs = fields["registrar_data"].as_object_mut().unwrap();
+    let (expires, updated) = (
+        theirs.remove("expires").unwrap(),
+        theirs.remove("updated").unwrap(),
+    );
+    // The registry's dates win over the registrar's.
+    assert!(date("expires").as_str() < expires.as_str().unwrap(), "{r}");
+    assert!(date("updated").as_str() < updated.as_str().unwrap(), "{r}");
     assert_eq!(
         fields,
         j!({ "status": "ok", "reason": null, "retry_after": null,
              "server": "https://rdap.example.net/rdap", "queried": "example.com", "found": true,
              "registrar": { "name": "Example Registrar, Inc.", "iana_id": "9999",
-                            "rdap": null },
+                            "rdap": "https://registrar.example.net/domain/example.com" },
+             "registrar_data": { "server": "https://registrar.example.net/", "status": "ok" },
              "domain_status": ["client delete prohibited", "client transfer prohibited", "client update prohibited"],
              "nameservers": ["ns1.example.net", "ns2.example.net"], "dnssec_delegation": false,
              "terms": "https://rdap.example.net/terms", "bootstrap": "override 2026-10-30" })
     );
     assert_eq!(asked(&web), ["/rdap/domain/example.com"]);
+    let theirs = web
+        .hits()
+        .into_iter()
+        .filter(|h| h.host == "registrar.example.net");
+    let theirs: Vec<_> = theirs.map(|h| h.path).collect();
+    assert_eq!(theirs, ["/domain/example.com"]);
     assert_eq!(found(&reports[0]), Vec::<String>::new());
     let https = web.hits().iter().all(|h| h.https || h.path == "/dns.json");
     assert!(https, "{:?}", web.hits());
+}
+
+#[test]
+fn the_registrar_fills_a_missing_expiry_and_says_when_it_has_no_record() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let names = ["noexpiry.example.com", "deleting.example.com"];
+    let (code, reports) = rdap(&stub, &web, &names, BOOTSTRAP);
+    assert_eq!(code, 0, "{reports:?}");
+    let r = &reports[0]["rdap"];
+    assert_eq!(r["expires"], r["registrar_data"]["expires"]);
+    assert!(r["expires"].is_string());
+    let theirs = &reports[1]["rdap"]["registrar_data"];
+    assert_eq!(
+        (&theirs["status"], &theirs["expires"]),
+        (&j!("not_found"), &Value::Null)
+    );
+}
+
+#[test]
+fn requests_to_one_host_are_a_second_apart() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let names = ["example.com", "soon.example.com", "lapsed.example.com"];
+    let (_, reports) = rdap(&stub, &web, &names, BOOTSTRAP);
+    assert!(reports.iter().all(|r| r["rdap"]["found"] == true));
+    let times: Vec<_> = web
+        .timed()
+        .into_iter()
+        .filter(|(h, _)| h.host == "rdap.example.net")
+        .map(|(_, at)| at)
+        .collect();
+    assert_eq!(times.len(), 3);
+    for pair in times.windows(2) {
+        let gap = pair[1].duration_since(pair[0]).as_secs_f64();
+        assert!(gap >= 1.0, "{gap} s");
+    }
 }
 
 #[test]
