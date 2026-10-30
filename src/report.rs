@@ -190,6 +190,15 @@ pub struct Sections {
 }
 
 impl Sections {
+    /// Marks `check`'s section as not run, and why.
+    pub fn not(&mut self, check: Check, status: Status, reason: &str) {
+        match check {
+            Check::Dns => self.dns = Some(Section::not(status, reason)),
+            Check::Propagation => self.propagation = Some(Section::not(status, reason)),
+            Check::Email | Check::Rdap | Check::Tls | Check::Http => {}
+        }
+    }
+
     /// Sections that came back `unavailable` or `rate_limited`.
     pub fn unavailable(&self) -> usize {
         let statuses = [

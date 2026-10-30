@@ -1,8 +1,12 @@
 //! `check`: the requested sections for each domain, built on DNS facts asked once and shared.
 //! The one engine behind the CLI, the page and the MCP server.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -10,6 +14,8 @@ use time::format_description::well_known::Rfc3339;
 use crate::dns::{self, Answer, Failure, RecordType, Resolver, ResponseCode};
 use crate::input::{self, Domain};
 use crate::report::{Check, Finding, Output, Report, Section, Sections, Severity, Status};
+use crate::sections::dns::Dns;
+use crate::sections::propagation::Propagation;
 use crate::{Error, Ports, sections};
 
 /// The checks this version runs, in report order.
@@ -148,15 +154,61 @@ pub fn now() -> String {
     now.format(&Rfc3339).unwrap_or_default()
 }
 
-/// One report per input, in input order; invalid inputs make no query.
+/// Domains one run may check: RDAP servers forbid bulk lookups (spec §6).
+pub const MAX_DOMAINS: usize = 20;
+
+/// One report per input, in input order. A domain given twice is checked once; invalid
+/// inputs make no query.
 pub fn run(inputs: &[String], options: &Options) -> Result<Output, Error> {
+    if inputs.len() > MAX_DOMAINS {
+        return Err(Error::usage(
+            format!(
+                "Too many domains: {} given, at most {MAX_DOMAINS} per run.",
+                inputs.len()
+            ),
+            format!("Split them into runs of {MAX_DOMAINS} or fewer."),
+        ));
+    }
     let mut resolver = None;
+    let mut done: HashMap<String, Checked> = HashMap::new();
     let mut reports = Vec::with_capacity(inputs.len());
     for input in inputs {
-        reports.push(match input::domain(input) {
-            Ok(d) => domain(input, &d, shared(&mut resolver, options)?, options)?,
-            Err(e) => Report::invalid(input, now(), e),
-        });
+        let d = match input::domain(input) {
+            Ok(d) => d,
+            Err(e) => {
+                reports.push(Report::invalid(input, now(), e));
+                continue;
+            }
+        };
+        let c = match done.get(&d.ascii) {
+            Some(c) => c.clone(),
+            None => {
+                let c = checked(&d, shared(&mut resolver, options)?, options);
+                done.insert(d.ascii.clone(), c.clone());
+                c
+            }
+        };
+        let mut findings = c.findings;
+        if d.port_ignored {
+            let message = format!(
+                "The port in {} was ignored; checks use ports 53, 80 and 443.",
+                input.trim()
+            );
+            findings.push(Finding::new(
+                Check::Dns,
+                Severity::Info,
+                "port_ignored",
+                message,
+                "",
+            ));
+        }
+        reports.push(Report::checked(
+            input,
+            &d,
+            c.checked_at,
+            findings,
+            c.sections,
+        ));
     }
     Ok(Output::new(reports))
 }
@@ -171,43 +223,168 @@ fn shared(slot: &mut Option<Arc<Resolver>>, o: &Options) -> Result<Arc<Resolver>
     Ok(r)
 }
 
-fn domain(input: &str, d: &Domain, resolver: Arc<Resolver>, o: &Options) -> Result<Report, Error> {
+/// One domain's sections and findings.
+#[derive(Clone)]
+struct Checked {
+    checked_at: String,
+    findings: Vec<Finding>,
+    sections: Sections,
+}
+
+/// The longest one domain's check runs; sections still running then are given up.
+const CAP: Duration = Duration::from_secs(30);
+
+/// Each section's time limit (spec §3.1).
+fn budget(check: Check) -> Duration {
+    Duration::from_secs(match check {
+        Check::Email | Check::Rdap | Check::Http => 20,
+        Check::Dns | Check::Propagation | Check::Tls => 15,
+    })
+}
+
+/// When a section still running is given up, and the reason it then gets.
+fn deadline(budget: Duration) -> (Duration, String) {
+    let limit = budget.min(CAP);
+    (limit, format!("Stopped after {} s.", limit.as_secs()))
+}
+
+/// One section's result, as its thread sends it.
+enum Part {
+    Dns(Section<Dns>),
+    Propagation(Section<Propagation>),
+    Down(Status, String),
+}
+
+struct Outcome {
+    check: Check,
+    part: Part,
+    findings: Vec<Finding>,
+}
+
+impl Outcome {
+    fn down(check: Check, reason: String) -> Outcome {
+        Outcome {
+            check,
+            part: Part::Down(Status::Unavailable, reason),
+            findings: Vec::new(),
+        }
+    }
+}
+
+/// The facts first, then every requested section on its own thread, each within its budget.
+fn checked(d: &Domain, resolver: Arc<Resolver>, o: &Options) -> Checked {
+    let start = Instant::now();
     let checked_at = now();
-    let cx = Cx {
+    let cx = Arc::new(Cx {
         resolver,
         domain: d.ascii.clone(),
         resolvers: resolvers(&o.resolvers),
         types: o.types.clone(),
-    };
-    let rt = crate::runtime()?;
-    let facts = rt.block_on(Facts::gather(&cx));
+    });
+    let (tx, rx) = mpsc::channel();
+    let wanted = o.checks.clone();
+    let sections = wanted.clone();
+    // Without a thread nothing is sent, and `collect` marks every section stopped.
+    let _ = thread::Builder::new().spawn(move || start_sections(cx, sections, tx));
+    let mut sections = Sections::default();
+    for check in CHECKS {
+        sections.not(check, Status::Skipped, "not requested");
+    }
     let mut findings = Vec::new();
-    if d.port_ignored {
-        let message = format!(
-            "The port in {} was ignored; checks use ports 53, 80 and 443.",
-            input.trim()
-        );
-        let f = Finding::new(Check::Dns, Severity::Info, "port_ignored", message, "");
-        findings.push(f);
+    for outcome in collect(&rx, &wanted, start, budget) {
+        match outcome.part {
+            Part::Dns(s) => sections.dns = Some(s),
+            Part::Propagation(s) => sections.propagation = Some(s),
+            Part::Down(status, why) => sections.not(outcome.check, status, &why),
+        }
+        findings.extend(outcome.findings);
     }
-    fn skipped<T>() -> Section<T> {
-        Section::not(Status::Skipped, "not requested")
+    Checked {
+        checked_at,
+        findings,
+        sections,
     }
-    let mut sections = Sections {
-        dns: Some(skipped()),
-        propagation: Some(skipped()),
+}
+
+fn start_sections(cx: Arc<Cx>, wanted: Vec<Check>, tx: mpsc::Sender<Outcome>) {
+    let facts = match crate::runtime() {
+        Ok(rt) => Arc::new(rt.block_on(Facts::gather(&cx))),
+        Err(e) => {
+            for check in wanted {
+                let _ = tx.send(Outcome::down(check, e.message.clone()));
+            }
+            return;
+        }
     };
-    if o.checks.contains(&Check::Dns) {
-        let (section, found) = rt.block_on(sections::dns::run(&cx, &facts));
-        sections.dns = Some(section);
-        findings.extend(found);
+    for check in wanted {
+        let (cx, facts, tx) = (Arc::clone(&cx), Arc::clone(&facts), tx.clone());
+        let _ = thread::Builder::new().spawn(move || {
+            // A report already printed without this section drops it quietly.
+            let _ = tx.send(section(check, &cx, &facts));
+        });
     }
-    if o.checks.contains(&Check::Propagation) {
-        let (section, found) = rt.block_on(sections::propagation::run(&cx, &facts));
-        sections.propagation = Some(section);
-        findings.extend(found);
+}
+
+fn section(check: Check, cx: &Cx, facts: &Facts) -> Outcome {
+    let rt = match crate::runtime() {
+        Ok(rt) => rt,
+        Err(e) => return Outcome::down(check, e.message),
+    };
+    let (part, findings) = match check {
+        Check::Dns => {
+            let (s, f) = rt.block_on(sections::dns::run(cx, facts));
+            (Part::Dns(s), f)
+        }
+        Check::Propagation => {
+            let (s, f) = rt.block_on(sections::propagation::run(cx, facts));
+            (Part::Propagation(s), f)
+        }
+        _ => (
+            Part::Down(Status::Skipped, "not requested".into()),
+            Vec::new(),
+        ),
+    };
+    Outcome {
+        check,
+        part,
+        findings,
     }
-    Ok(Report::checked(input, d, checked_at, findings, sections))
+}
+
+/// Each wanted section's outcome, or `unavailable` once its deadline passes.
+fn collect(
+    rx: &mpsc::Receiver<Outcome>,
+    wanted: &[Check],
+    start: Instant,
+    budget: impl Fn(Check) -> Duration,
+) -> Vec<Outcome> {
+    let mut done: Vec<Outcome> = Vec::new();
+    loop {
+        let pending: Vec<Check> = wanted
+            .iter()
+            .copied()
+            .filter(|c| !done.iter().any(|o| o.check == *c))
+            .collect();
+        let Some(next) = pending.iter().map(|&c| deadline(budget(c)).0).min() else {
+            return done;
+        };
+        match rx.recv_timeout(next.saturating_sub(start.elapsed())) {
+            Ok(o) if pending.contains(&o.check) => done.push(o),
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                for check in pending {
+                    let (limit, why) = deadline(budget(check));
+                    if start.elapsed() >= limit {
+                        done.push(Outcome::down(check, why));
+                    }
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                let why = format!("Stopped after {} s.", start.elapsed().as_secs());
+                done.extend(pending.into_iter().map(|c| Outcome::down(c, why.clone())));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -237,6 +414,47 @@ mod tests {
         assert_eq!(named(&resolvers(&[])), public);
         let custom = ["127.0.0.1:5353".parse().unwrap()];
         assert_eq!(named(&resolvers(&custom)), "Custom 127.0.0.1:5353");
+    }
+
+    #[test]
+    fn sections_past_their_deadline_are_stopped() {
+        assert_eq!(
+            deadline(Duration::from_secs(15)),
+            (Duration::from_secs(15), "Stopped after 15 s.".into())
+        );
+        assert_eq!(
+            deadline(Duration::from_secs(40)),
+            (CAP, "Stopped after 30 s.".into())
+        );
+        let reason = |o: &Outcome| match &o.part {
+            Part::Down(status, why) => (o.check, *status, why.clone()),
+            _ => (o.check, Status::Ok, String::new()),
+        };
+        let (tx, rx) = mpsc::channel();
+        tx.send(Outcome::down(Check::Propagation, "sent".into()))
+            .unwrap();
+        let start = Instant::now();
+        let quick = |c| match c {
+            Check::Dns => Duration::from_secs(1),
+            _ => Duration::from_secs(10),
+        };
+        let done = collect(&rx, &CHECKS, start, quick);
+        let took = start.elapsed();
+        assert!((1.0..3.0).contains(&took.as_secs_f64()), "{took:?}");
+        let mut got: Vec<_> = done.iter().map(reason).collect();
+        got.sort_by_key(|g| g.0);
+        let down = Status::Unavailable;
+        assert_eq!(
+            got,
+            [
+                (Check::Dns, down, "Stopped after 1 s.".into()),
+                (Check::Propagation, down, "sent".into())
+            ]
+        );
+        // Every sender gone: nothing more can come, so the rest stop at once.
+        drop(tx);
+        let done = collect(&rx, &[Check::Dns], Instant::now(), budget);
+        assert_eq!(reason(&done[0]).2, "Stopped after 0 s.");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 mod common;
 
 use common::{DnsStub, closed_udp_port, json, run};
+use domain_check::dns::RecordType;
 use serde_json::{Value, json as j};
 
 fn lookup(stub: &DnsStub, args: &[&str]) -> (i32, String, String) {
@@ -312,4 +313,135 @@ fn closed_pipes_end_quietly() {
     }
     let usage = ["lookup", "example.com", "AXFR"];
     assert_eq!(common::closed(&usage, false), (2, String::new()));
+}
+
+/// `check` against the stub, which also plays the zones' nameservers and the resolvers.
+fn check(stub: &DnsStub, args: &[&str]) -> (i32, Value) {
+    let (dns, ports) = (stub.addr(), stub.ports());
+    let base = ["--dns", dns.as_str(), "--resolver", dns.as_str()];
+    let env = [("DOMAIN_CHECK_LOOPBACK_PORTS", ports.as_str())];
+    json(&[args, &base].concat(), &env)
+}
+
+#[test]
+fn more_than_20_domains_is_a_usage_error() {
+    let stub = DnsStub::new();
+    let names: Vec<String> = (0..21).map(|i| format!("d{i}.example.com")).collect();
+    let mut args: Vec<&str> = names.iter().map(String::as_str).collect();
+    let dns = stub.addr();
+    args.extend(["--dns", &dns]);
+    let (code, out, err) = run(&args, &[]);
+    assert_eq!((code, out.as_str()), (2, ""));
+    let want = "✗ Too many domains: 21 given, at most 20 per run.\n  Split them into runs of 20 or fewer.\n";
+    assert_eq!(err, want);
+    assert!(stub.queries().is_empty());
+    let (code, out, err) = run(&["check", "--json"], &[]);
+    assert_eq!((code, out.as_str()), (2, ""));
+    assert_eq!(err, "✗ No domain given.\n  Try: domain-check example.com\n");
+}
+
+#[test]
+fn invalid_inputs_get_their_error_and_no_query() {
+    let stub = DnsStub::new();
+    let (code, v) = check(&stub, &["printer.test", "192.0.2.1", "intranet", ""]);
+    assert_eq!(code, 1);
+    let errors: Vec<_> = v["reports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["error"]["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        errors,
+        ["special_use", "ip_address", "single_label", "empty"]
+    );
+    let r = &v["reports"][0];
+    assert_eq!(
+        (&r["domain"], &r["dns"], &r["propagation"], &r["findings"]),
+        (&Value::Null, &Value::Null, &Value::Null, &j!([]))
+    );
+    assert!(stub.queries().is_empty());
+    let summary = j!({ "domains": 4, "errors": 0, "warnings": 0, "info": 0, "unavailable": 0 });
+    assert_eq!(v["summary"], summary);
+}
+
+#[test]
+fn a_domain_given_twice_is_checked_once() {
+    let stub = DnsStub::new();
+    let inputs = ["example.com", "Example.COM.", "https://example.com:8443/"];
+    let (code, v) = check(&stub, &[&inputs[..], &["-c", "dns"]].concat());
+    assert_eq!(code, 0);
+    let reports = v["reports"].as_array().unwrap();
+    let got: Vec<_> = reports
+        .iter()
+        .map(|r| (r["input"].as_str().unwrap(), r["domain"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        got,
+        inputs
+            .iter()
+            .map(|i| (*i, "example.com"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(reports[0]["dns"], reports[2]["dns"]);
+    assert_eq!(reports[1]["findings"], j!([]));
+    let port = j!([{ "code": "port_ignored", "severity": "info", "check": "dns",
+        "message": "The port in https://example.com:8443/ was ignored; checks use ports 53, 80 and 443.",
+        "hint": null }]);
+    assert_eq!(reports[2]["findings"], port);
+    let a = stub
+        .queries()
+        .into_iter()
+        .filter(|q| q.name == "example.com" && q.qtype == RecordType::A)
+        .count();
+    assert_eq!(a, 1);
+    assert_eq!(
+        (&v["summary"]["domains"], &v["summary"]["info"]),
+        (&j!(3), &j!(1))
+    );
+    let at = reports[0]["checked_at"].as_str().unwrap();
+    assert!(
+        at.len() == 20 && at.ends_with('Z') && at.as_bytes()[10] == b'T',
+        "{at}"
+    );
+}
+
+#[test]
+fn slow_answers_keep_each_section_inside_its_budget() {
+    let slow = DnsStub::start(|a| {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        common::fixtures(a)
+    });
+    let started = std::time::Instant::now();
+    let (code, v) = check(&slow, &["example.com"]);
+    let took = started.elapsed().as_secs_f64();
+    assert!(took < 15.0, "{took} s");
+    assert_eq!(code, 0, "{v}");
+    let r = &v["reports"][0];
+    assert_eq!(
+        (&r["dns"]["status"], &r["propagation"]["status"]),
+        (&j!("ok"), &j!("ok"))
+    );
+    assert_eq!(r["propagation"]["consistent"], true);
+}
+
+#[test]
+fn a_silent_resolver_makes_every_section_unavailable_quickly() {
+    let silent = DnsStub::start(|_| None);
+    let started = std::time::Instant::now();
+    let (code, v) = check(&silent, &["example.com"]);
+    assert!(started.elapsed().as_secs() < 15);
+    assert_eq!(code, 3);
+    let r = &v["reports"][0];
+    let reason = format!(
+        "Couldn't reach the DNS resolver {}: timeout.",
+        silent.addr()
+    );
+    assert_eq!(
+        (&r["dns"]["status"], &r["dns"]["reason"]),
+        (&j!("unavailable"), &j!(reason))
+    );
+    let reason = j!("No DNS answer, so this check couldn't run.");
+    assert_eq!(r["propagation"]["reason"], reason);
+    assert_eq!(v["summary"]["unavailable"], 2);
 }
