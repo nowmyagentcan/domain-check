@@ -6,6 +6,7 @@ use std::thread;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use domain_check::check::{self, Options};
 use domain_check::dns::{self, Resolver};
+use domain_check::mcp::{self, Defaults};
 use domain_check::report::Output;
 use domain_check::sections::email::dkim;
 use domain_check::sections::rdap;
@@ -66,6 +67,33 @@ enum Command {
     /// Run one DNS query (dig-like); an IP address gives its PTR
     #[command(after_help = AFTER_HELP)]
     Lookup(LookupArgs),
+    /// Run the MCP server on stdio
+    Mcp(ServerArgs),
+}
+
+/// What every check a server runs starts from.
+#[derive(clap::Args)]
+struct ServerArgs {
+    /// public resolver for propagation and DNSSEC (repeatable)
+    #[arg(long, value_name = "IP[:PORT]")]
+    resolver: Vec<String>,
+    /// also trust the PEM certificates in FILE
+    #[arg(long, value_name = "FILE")]
+    ca_file: Option<String>,
+}
+
+impl ServerArgs {
+    fn defaults(&self) -> Result<Defaults, Error> {
+        Defaults::new(resolvers(&self.resolver)?, ca(self.ca_file.as_deref())?)
+    }
+}
+
+fn resolvers(raw: &[String]) -> Result<Vec<std::net::SocketAddr>, Error> {
+    raw.iter().map(|s| dns::server("--resolver", s)).collect()
+}
+
+fn ca(file: Option<&str>) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, Error> {
+    Ok(file.map(net::ca_file).transpose()?.unwrap_or_default())
 }
 
 #[derive(clap::Args)]
@@ -190,11 +218,7 @@ fn options(args: &CheckArgs) -> Result<Options, Error> {
             .as_deref()
             .map(|s| dns::server("--dns", s))
             .transpose()?,
-        resolvers: args
-            .resolver
-            .iter()
-            .map(|s| dns::server("--resolver", s))
-            .collect::<Result<_, _>>()?,
+        resolvers: resolvers(&args.resolver)?,
         types: lookup::types(&args.types)?,
         selectors: {
             let mut selectors: Vec<String> = Vec::new();
@@ -218,12 +242,7 @@ fn options(args: &CheckArgs) -> Result<Options, Error> {
                 })
             })
             .transpose()?,
-        ca: args
-            .ca_file
-            .as_deref()
-            .map(net::ca_file)
-            .transpose()?
-            .unwrap_or_default(),
+        ca: ca(args.ca_file.as_deref())?,
         allow_private: args.allow_private,
         ports: Ports::from_env()?,
         bootstrap: rdap::from_env()?,
@@ -359,6 +378,7 @@ fn cli() -> clap::Command {
         .mut_arg("version", |a| a.help("print version"))
         .mut_subcommand("check", lower)
         .mut_subcommand("lookup", lower)
+        .mut_subcommand("mcp", lower)
 }
 
 fn main() -> ExitCode {
@@ -372,6 +392,10 @@ fn main() -> ExitCode {
     let done = match cli.command {
         Some(Command::Check(args)) => run_check(args),
         Some(Command::Lookup(args)) => run_lookup(args),
+        Some(Command::Mcp(args)) => args.defaults().and_then(mcp::serve).map(|()| Done {
+            out: String::new(),
+            code: 0,
+        }),
         // No arguments at all, in a terminal: the interactive session.
         None if std::env::args_os().len() == 1
             && io::stdin().is_terminal()

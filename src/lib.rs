@@ -5,6 +5,7 @@ pub mod dns;
 pub mod input;
 pub mod interactive;
 pub mod lookup;
+pub mod mcp;
 pub mod net;
 pub mod report;
 pub mod sections {
