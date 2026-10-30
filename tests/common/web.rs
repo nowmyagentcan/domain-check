@@ -456,7 +456,9 @@ fn params(names: &[&str], cn: &str, days: (i64, i64), ca: bool) -> CertificatePa
     let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
     let mut p = CertificateParams::new(names).unwrap();
     p.distinguished_name.push(DnType::CommonName, cn);
-    let now = OffsetDateTime::now_utc();
+    // Half a day back: a check that reads the clock just before the certificate is made
+    // still counts the same whole days as one just after.
+    let now = OffsetDateTime::now_utc() - Duration::hours(12);
     p.not_before = now + Duration::days(days.0);
     p.not_after = now + Duration::days(days.1);
     match ca {
