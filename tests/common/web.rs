@@ -66,6 +66,18 @@ const GOOD: [(&str, &str); 7] = [
     ("Cross-Origin-Opener-Policy", "same-origin"),
 ];
 
+/// A 200 with [`GOOD`]'s headers, `changed` replacing or adding some.
+fn good_with(changed: &[(&'static str, &str)]) -> Reply {
+    let kept = GOOD
+        .iter()
+        .filter(|(k, _)| !changed.iter().any(|(c, _)| c == k));
+    let headers: Vec<_> = kept.chain(changed).copied().collect();
+    Reply::new(
+        200, &headers, "ok
+",
+    )
+}
+
 /// The MTA-STS policy of `mta-sts.<domain>`, by the domain's first label.
 fn sts_policy(host: &str) -> Reply {
     let text = |body: &str| Reply::new(200, &[("Content-Type", "text/plain")], body);
@@ -297,6 +309,17 @@ pub fn route(host: &str, path: &str, https: bool, nth: usize) -> Reply {
             "ok\n",
         ),
         ("bare", true, _) => Reply::new(200, &[("Content-Type", "text/plain")], "ok\n"),
+        ("offhost", false, _) => to(301, "https://selfsigned.example.com/"),
+        ("downgrade", false, "/") => to(301, "https://downgrade.example.com/good"),
+        ("downgrade", true, "/") => to(302, "http://downgrade.example.com/plain"),
+        ("tabcsp", true, _) => good_with(&[(
+            "Content-Security-Policy",
+            "default-src	'unsafe-inline'; frame-ancestors	'none'",
+        )]),
+        ("badframe", true, _) => good_with(&[
+            ("Content-Security-Policy", "default-src 'self'"),
+            ("X-Frame-Options", "ALLOWALL"),
+        ]),
         ("hstsdup", true, _) => Reply::new(
             200,
             &[("Strict-Transport-Security", "max-age=63072000; max-age=0")],

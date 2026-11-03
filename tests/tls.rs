@@ -287,3 +287,18 @@ fn the_text_report_names_the_certificate() {
     assert_eq!(head, "Certificate  tls.example.com · Test Intermediate");
     assert!(tail.ends_with(" days) · TLS 1.3 · trusted"), "{line}");
 }
+
+#[test]
+#[ignore = "known bug: DC19"]
+fn the_second_ipv4_address_is_tried_when_the_first_refuses() {
+    // macOS has no 127.0.0.2, so a connection there doesn't get a quick refusal.
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let (_, r) = allowed(&stub, &web, "twoaddr.example.com");
+    // Spec: the first address that accepts, A records first, then AAAA, at most 2 tried.
+    assert_eq!(r["tls"]["address"], "127.0.0.1", "{}", r["tls"]);
+    assert_eq!(r["tls"]["trusted"], true);
+    assert!(found(&r).is_empty(), "{:?}", found(&r));
+}

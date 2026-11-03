@@ -391,6 +391,11 @@ pub const MAIL: &[(&str, RecordType, &str)] = {
         ("s._domainkey.twokeys.example.net", TXT, "v=DKIM1; k=ed25519; p=iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w="),
         ("duptag.example.net", A, "192.0.2.48"),
         ("s._domainkey.duptag.example.net", TXT, "v=DKIM1; k=ed25519; p=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=; p="),
+        // DMARC and DKIM lookups that fail while the domain answers (fixtures())
+        ("mailfail.example.net", TXT, "v=spf1 -all"),
+        // Terminal controls in record data: erase the screen, set the clipboard (OSC 52)
+        ("escape.example.com", TXT, "safe[2J]52;c;aGk=end"),
+        ("escapespf.example.com", TXT, "v=spf1 include:]52;c;aGk=.example.com -all"),
         // TLS: the first label says what the web mock does (tests/common/web.rs)
         ("tls.example.com", A, "127.0.0.1"),
         ("tls12.example.com", A, "127.0.0.1"),
@@ -405,6 +410,9 @@ pub const MAIL: &[(&str, RecordType, &str)] = {
         ("leafonly.example.com", A, "127.0.0.1"),
         ("weak.example.com", A, "127.0.0.1"),
         ("closed.example.com", AAAA, "::1"),
+        // The first address refuses (nothing listens on 127.0.0.2), the second answers
+        ("twoaddr.example.com", A, "127.0.0.2"),
+        ("twoaddr.example.com", A, "127.0.0.1"),
         ("ten.example.com", A, "10.0.0.1"),
         ("ula.example.com", AAAA, "fc00::1"),
         ("mapped.example.com", AAAA, "::ffff:127.0.0.1"),
@@ -420,6 +428,10 @@ pub const MAIL: &[(&str, RecordType, &str)] = {
         ("headers.example.com", A, "127.0.0.1"),
         ("bare.example.com", A, "127.0.0.1"),
         ("hstsdup.example.com", A, "127.0.0.1"),
+        ("offhost.example.com", A, "127.0.0.1"),
+        ("downgrade.example.com", A, "127.0.0.1"),
+        ("tabcsp.example.com", A, "127.0.0.1"),
+        ("badframe.example.com", A, "127.0.0.1"),
         // RDAP: tests/common/web.rs rdap() serves the registry and the registrar
         ("rdap.example.net", A, "127.0.0.1"),
         ("registrar.example.net", A, "127.0.0.1"),
@@ -699,7 +711,8 @@ fn resolve(
 
 /// The fixture zones, answered as a resolver (RD on: AD for example.com) or as their
 /// authoritative servers 127.0.0.1 and ::1 (RD off: AA). Names with a `servfail`, `refused` or
-/// `silent` label fail everywhere; the zones under example.org fail at ::1 as named.
+/// `silent` label fail everywhere, as do mailfail.example.net's DMARC record and DKIM keys;
+/// the zones under example.org fail at ::1 as named.
 pub fn fixtures(a: &Asked) -> Option<Reply> {
     let failed = |rcode| Reply {
         rcode,
@@ -712,6 +725,10 @@ pub fn fixtures(a: &Asked) -> Option<Reply> {
             "refused" => return Some(failed(ResponseCode::Refused)),
             _ => {}
         }
+    }
+    let mail = a.name.strip_suffix(".mailfail.example.net");
+    if mail.is_some_and(|m| m == "_dmarc" || m.ends_with("._domainkey")) {
+        return Some(failed(ResponseCode::ServFail));
     }
     let zone = zone_of(&a.name).unwrap_or("example.com");
     let at = (!a.rd).then_some(a.at);

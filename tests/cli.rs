@@ -705,3 +705,56 @@ fn every_subset_of_checks_runs_only_what_it_names() {
         );
     }
 }
+
+#[test]
+#[ignore = "known bug: DC25"]
+fn a_ca_file_with_one_broken_block_among_good_ones_is_a_usage_error() {
+    let web = common::web::Web::new();
+    let dir = std::env::temp_dir().join(format!("dc-ca-mixed-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("mixed.pem");
+    let good = std::fs::read_to_string(&web.ca).unwrap();
+    let broken = "-----BEGIN CERTIFICATE-----\n***not base64***\n-----END CERTIFICATE-----\n";
+    std::fs::write(&file, good + broken).unwrap();
+    let stub = DnsStub::new();
+    let (dns, path) = (stub.addr(), file.to_str().unwrap());
+    // tls.example.com is loopback: without --allow-private nothing connects.
+    let args = [
+        "tls.example.com",
+        "-c",
+        "tls",
+        "--dns",
+        &dns,
+        "--ca-file",
+        path,
+    ];
+    let (code, _, err) = run(&args, &[]);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("mixed.pem"), "{err}");
+}
+
+#[test]
+#[ignore = "known bug: DC27"]
+fn terminal_controls_in_dns_data_never_reach_the_terminal() {
+    let stub = DnsStub::new();
+    let dns = stub.addr();
+    // Colour on, as in a terminal; the records hold OSC 52 (set the clipboard).
+    let env = [("NO_COLOR", ""), ("CLICOLOR_FORCE", "1")];
+    let lookup = ["lookup", "escape.example.com", "TXT", "--dns", &dns];
+    let check = [
+        "escapespf.example.com",
+        "-c",
+        "email",
+        "--dns",
+        &dns,
+        "--resolver",
+        &dns,
+    ];
+    for args in [&lookup[..], &check] {
+        let (_, out, _) = run(args, &env);
+        assert!(out.contains('\x1b'), "colour is on: {out:?}");
+        assert!(!out.contains("\x1b]"), "{out:?}");
+        assert!(!out.contains("\x1b[2J"), "{out:?}");
+    }
+}

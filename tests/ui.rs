@@ -685,3 +685,11 @@ fn the_page_script_renders_reports_with_failed_parts() {
     ];
     assert_eq!(page_errors(checks), "");
 }
+
+#[test]
+#[ignore = "known bug: DC24"]
+fn the_page_script_renders_failed_mail_lookups() {
+    // DMARC and the DKIM selector answer SERVFAIL: the Email line must not read "null".
+    let checks: &[(&str, &[&str])] = &[("mailfail.example.net", &["-c", "email", "-s", "s"])];
+    assert_eq!(page_errors(checks), "");
+}

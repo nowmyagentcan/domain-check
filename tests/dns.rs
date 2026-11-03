@@ -778,15 +778,15 @@ fn answers_arrive_while_other_programs_hold_loopback_ports() {
     }
 }
 
-#[test]
-fn txt_values_that_differ_only_in_case_differ() {
+/// A stub where token.example.com's TXT record is `resolver` through a resolver and
+/// `nameservers` at the nameservers.
+fn token_stub(resolver: &'static str, nameservers: &'static str) -> DnsStub {
     use hickory_proto::rr::rdata::TXT;
-    // The nameservers publish the new token; the resolver still has the old one.
-    let stub = DnsStub::start(|a| {
+    DnsStub::start(move |a| {
         if a.name != "token.example.com" {
             return common::fixtures(a);
         }
-        let token = if a.rd { "token=AbC123" } else { "token=abc123" };
+        let token = if a.rd { resolver } else { nameservers };
         let txt = domain_check::dns::RData::TXT(TXT::new(vec![token.into()]));
         let answers = match a.qtype {
             RecordType::TXT => vec![common::record(&a.name, 300, txt)],
@@ -801,9 +801,25 @@ fn txt_values_that_differ_only_in_case_differ() {
             aa: !a.rd,
             ..common::Reply::default()
         })
-    });
+    })
+}
+
+#[test]
+fn txt_values_that_differ_only_in_case_differ() {
+    // The nameservers publish the new token; the resolver still has the old one.
+    let stub = token_stub("token=AbC123", "token=abc123");
     let (_, r) = propagation(&stub, "token.example.com", &["-t", "TXT"]);
     let p = &r["propagation"];
     assert_eq!(p["consistent"], false, "{p}");
     assert_eq!(p["resolvers"][0]["answers"]["TXT"]["agrees"], false);
+}
+
+#[test]
+#[ignore = "known bug: DC20"]
+fn txt_that_starts_like_a_cname_keeps_its_case() {
+    // Text that happens to start with "CNAME " is still text.
+    let stub = token_stub("CNAME TokenABC", "CNAME tokenabc");
+    let (_, r) = propagation(&stub, "token.example.com", &["-t", "TXT"]);
+    let p = &r["propagation"];
+    assert_eq!(p["consistent"], false, "{p}");
 }

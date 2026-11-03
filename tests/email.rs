@@ -1581,3 +1581,26 @@ fn a_repeated_mta_sts_mode_is_a_policy_error() {
     );
     assert_eq!(severities(&r, "mta_sts_policy_syntax"), ["error"]);
 }
+
+#[test]
+#[ignore = "known bug: DC24"]
+fn failed_dmarc_and_dkim_lookups_dont_read_as_missing() {
+    let stub = DnsStub::new();
+    let dns = stub.addr();
+    let args = [
+        "mailfail.example.net",
+        "-c",
+        "email",
+        "-s",
+        "s",
+        "--dns",
+        &dns,
+        "--resolver",
+        &dns,
+    ];
+    let (_, out, _) = common::run(&args, &[]);
+    let line = out.lines().find(|l| l.starts_with("Email")).unwrap();
+    // Both lookups answered SERVFAIL: unknown, not "none".
+    assert!(line.contains("DMARC SERVFAIL"), "{line}");
+    assert!(!line.contains("DKIM none"), "{line}");
+}

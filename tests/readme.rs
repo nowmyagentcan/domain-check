@@ -73,3 +73,12 @@ fn the_help_the_readme_points_to_lists_the_options() {
         assert!(out.contains(flag), "{flag} isn't in check --help:\n{out}");
     }
 }
+
+#[test]
+#[ignore = "known bug: DC28"]
+fn what_goes_online_names_the_sending_ip() {
+    // SPF macros such as %{i} put the --spf-ip address into DNS names the tool looks up.
+    let section = README.split("### What goes online").nth(1).unwrap();
+    let section = section.split("\n#").next().unwrap();
+    assert!(section.contains("--spf-ip"), "{section}");
+}

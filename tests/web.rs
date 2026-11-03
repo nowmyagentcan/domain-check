@@ -378,3 +378,84 @@ fn a_repeated_hsts_directive_is_invalid() {
         "{codes:?}"
     );
 }
+
+/// The http findings that aren't info.
+fn http_problems(report: &Value) -> Vec<String> {
+    let findings = report["findings"].as_array().unwrap();
+    let problem = |f: &&Value| f["check"] == "http" && f["severity"] != "info";
+    findings
+        .iter()
+        .filter(problem)
+        .map(|f| f.to_string())
+        .collect()
+}
+
+#[test]
+#[ignore = "known bug: DC18"]
+fn a_redirect_that_fails_after_the_first_hop_is_a_finding() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    // http:// sends visitors to a host whose certificate isn't trusted; https:// itself loads.
+    for extra in [&["--allow-private"][..], &["--allow-private", "-c", "tls"]] {
+        let (_, r) = http(&stub, &web, "offhost.example.com", extra);
+        assert_eq!(r["http"]["https"]["final_status"], 200);
+        assert!(r["http"]["http"]["error"].is_string(), "{}", r["http"]);
+        assert!(!http_problems(&r).is_empty(), "{extra:?}: {:?}", found(&r));
+    }
+}
+
+#[test]
+#[ignore = "known bug: DC23"]
+fn an_https_chain_that_ends_on_http_is_a_finding() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let (_, r) = allowed(&stub, &web, "downgrade.example.com");
+    assert_eq!(
+        r["http"]["https"]["final"],
+        "http://downgrade.example.com/plain"
+    );
+    assert!(!http_problems(&r).is_empty(), "{:?}", found(&r));
+}
+
+#[test]
+#[ignore = "known bug: DC21"]
+fn csp_directives_separated_by_tabs_are_read() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let (_, r) = allowed(&stub, &web, "tabcsp.example.com");
+    // CSP3 §2.2.1: a directive's name and value are split on ASCII whitespace, tab included.
+    let codes = found(&r);
+    assert!(
+        codes.iter().any(|c| c.starts_with("csp_unsafe"))
+            && !codes
+                .iter()
+                .any(|c| c.starts_with("frame_protection_missing")),
+        "{codes:?}"
+    );
+}
+
+#[test]
+#[ignore = "known bug: DC22"]
+fn an_x_frame_options_value_browsers_ignore_protects_nothing() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let (_, r) = allowed(&stub, &web, "badframe.example.com");
+    // RFC 7034 §2.1: DENY or SAMEORIGIN; browsers ignore ALLOWALL and frame the page.
+    let codes = found(&r);
+    assert!(
+        codes
+            .iter()
+            .any(|c| c.starts_with("frame_protection_missing")),
+        "{codes:?}"
+    );
+}
+
+#[test]
+#[ignore = "known bug: DC26"]
+fn addresses_that_fail_to_resolve_make_the_web_checks_unavailable() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    for domain in ["servfail.example.com", "refused.example.com"] {
+        let (code, r) = http(&stub, &web, domain, &["--allow-private", "-c", "tls"]);
+        for check in ["tls", "http"] {
+            // A failed lookup says nothing about whether the domain has an address.
+            assert_eq!(r[check]["status"], "unavailable", "{domain}: {}", r[check]);
+        }
+        assert_eq!(code, 3, "{domain}");
+    }
+}
