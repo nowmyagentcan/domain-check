@@ -1570,7 +1570,6 @@ fn a_repeated_dkim_tag_makes_the_record_invalid() {
 }
 
 #[test]
-#[ignore = "known bug: DC05"]
 fn a_repeated_mta_sts_mode_is_a_policy_error() {
     let (stub, web) = (DnsStub::new(), Web::new());
     let r = fetched(&stub, &web, "stsdup.example.net");

@@ -126,12 +126,18 @@ fn covers(pattern: &str, host: &str) -> bool {
 fn read_policy(policy: &mut Policy, text: &str) -> Vec<String> {
     let mut problems = Vec::new();
     let mut version = None;
+    let mut seen = Vec::new();
     for line in text.lines() {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
-        let value = value.trim();
-        match key.trim() {
+        let (key, value) = (key.trim(), value.trim());
+        // Only mx may repeat (RFC 8461 §3.2): a second mode or max_age leaves the policy unclear.
+        if matches!(key, "version" | "mode" | "max_age") && seen.contains(&key) {
+            problems.push(format!("it has more than one {key} line"));
+        }
+        seen.push(key);
+        match key {
             "version" => version = Some(value.to_string()),
             "mode" => policy.mode = Some(value.to_string()),
             "mx" => policy.mx.push(value.to_string()),
