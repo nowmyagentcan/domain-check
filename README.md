@@ -105,7 +105,7 @@ Every check goes online from your computer, straight to these, and to nothing el
 - Registration: the registry's RDAP server from IANA's bootstrap list (bundled; `data.iana.org` only when a domain's server isn't in it), and the registrar's RDAP server it links to.
 - The domain's web server on 80 and 443, its MTA-STS policy host and its BIMI files. Your OS may fetch certificate intermediates and revocation lists while checking trust.
 
-It sends the domain name and nothing else; there is no account, no API key, no telemetry and no update check.
+It sends the domain name and nothing else, except that with `--spf-ip`, SPF macros such as `%{i}` put that IP address into the DNS names it looks up. There is no account, no API key, no telemetry and no update check.
 TLS and HTTP connections to private addresses are refused unless you pass `--allow-private`.
 The services keep their own terms: RDAP servers allow lookups you ask for but not bulk or automated sweeps, hence at most 20 domains, 4 RDAP requests per domain and a 1 s pause per server; Google Public DNS falls under the Google APIs Terms of Service and 1.1.1.1 under Cloudflare's terms.
 Expiry days use this computer's clock.

@@ -75,7 +75,6 @@ fn the_help_the_readme_points_to_lists_the_options() {
 }
 
 #[test]
-#[ignore = "known bug: DC28"]
 fn what_goes_online_names_the_sending_ip() {
     // SPF macros such as %{i} put the --spf-ip address into DNS names the tool looks up.
     let section = README.split("### What goes online").nth(1).unwrap();
