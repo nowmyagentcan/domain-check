@@ -142,8 +142,8 @@ impl Facts {
         self.answers.iter().find(|(x, _)| *x == t).map(|(_, a)| a)
     }
 
-    /// The domain's first IPv4 and first IPv6 address, for a check that connects to it; or
-    /// the section's status and reason when there is none.
+    /// The domain's first two addresses, A records before AAAA, for a check that connects to
+    /// it; or the section's status and reason when there is none.
     pub fn web_addresses(&self, domain: &str) -> Result<Vec<IpAddr>, (Status, String)> {
         let no_answer = || {
             let why = "No DNS answer, so this check couldn't run.";
@@ -156,11 +156,12 @@ impl Facts {
             return Err((Status::Skipped, format!("{domain} doesn't exist in DNS.")));
         }
         let types = [RecordType::A, RecordType::AAAA];
-        let first = |t| {
-            let m = self.answer(t)?.as_ref().ok()?;
-            dns::value(&dns::records(m, t).next()?.data).parse().ok()
-        };
-        let ips: Vec<IpAddr> = types.into_iter().filter_map(first).collect();
+        let ips: Vec<IpAddr> = types
+            .into_iter()
+            .filter_map(|t| Some((t, self.answer(t)?.as_ref().ok()?)))
+            .flat_map(|(t, m)| dns::records(m, t).filter_map(|r| dns::value(&r.data).parse().ok()))
+            .take(2)
+            .collect();
         // Only NOERROR and NXDOMAIN say what the domain has; SERVFAIL or REFUSED says nothing.
         let code = |t| Some(self.answer(t)?.as_ref().ok()?.metadata.response_code);
         let failed = types

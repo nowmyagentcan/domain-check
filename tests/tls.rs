@@ -289,7 +289,6 @@ fn the_text_report_names_the_certificate() {
 }
 
 #[test]
-#[ignore = "known bug: DC19"]
 fn the_second_ipv4_address_is_tried_when_the_first_refuses() {
     // macOS has no 127.0.0.2, so a connection there doesn't get a quick refusal.
     if cfg!(target_os = "macos") {
