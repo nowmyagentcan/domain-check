@@ -68,6 +68,70 @@ fn cli(args: &[&str], env: &[(&str, &str)]) -> Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
+/// What in `v` the JSON Schema `s` doesn't allow or doesn't describe, by path; `root` holds
+/// the `$defs`. Covers the keywords the tools' schemas use.
+fn misfits(root: &Value, s: &Value, v: &Value, at: &str) -> Vec<String> {
+    if let Some(r) = s["$ref"].as_str() {
+        let name = r.trim_start_matches("#/$defs/");
+        return misfits(root, &root["$defs"][name], v, at);
+    }
+    let kind = match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(n) if n.is_f64() => "number",
+        Value::Number(_) => "integer",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    };
+    let types = match &s["type"] {
+        Value::String(t) => vec![t.as_str()],
+        t => t
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect(),
+    };
+    if !types.is_empty() && !types.contains(&kind) {
+        return vec![format!("{at}: {kind}, not {}", s["type"])];
+    }
+    let mut out = Vec::new();
+    if s["enum"].as_array().is_some_and(|e| !e.contains(v)) {
+        out.push(format!("{at}: {v} isn't one of {}", s["enum"]));
+    }
+    let described = |key: &str| s.get(key).filter(|d| d.is_object());
+    match v {
+        Value::Object(o) => {
+            let required = s["required"].as_array().into_iter().flatten();
+            for k in required.filter_map(Value::as_str) {
+                if !o.contains_key(k) {
+                    out.push(format!("{at}.{k}: missing"));
+                }
+            }
+            for (k, x) in o {
+                match s["properties"].get(k).or(described("additionalProperties")) {
+                    Some(sub) => out.extend(misfits(root, sub, x, &format!("{at}.{k}"))),
+                    None => out.push(format!("{at}.{k}: not described")),
+                }
+            }
+        }
+        Value::Array(a) => {
+            if s["minItems"].as_u64().is_some_and(|n| (a.len() as u64) < n) {
+                out.push(format!("{at}: fewer than {} items", s["minItems"]));
+            }
+            for (i, x) in a.iter().enumerate() {
+                match described("items") {
+                    Some(sub) => out.extend(misfits(root, sub, x, &format!("{at}[{i}]"))),
+                    None => out.push(format!("{at}[{i}]: not described")),
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 /// A successful call: structured content and its one text block both the CLI's JSON.
 fn same_as_cli(response: &Value, args: &[&str], env: &[(&str, &str)]) {
     let result = &response["result"];
@@ -119,6 +183,12 @@ fn lists_both_tools_with_their_schemas() {
             (&json!("object"), &json!(false))
         );
         assert_eq!(input["properties"]["types"]["items"]["enum"], types);
+        for (name, p) in input["properties"].as_object().unwrap() {
+            if let Some(default) = p.get("default") {
+                let wrong = misfits(input, p, default, name);
+                assert!(wrong.is_empty(), "{}: {wrong:?}", t["name"]);
+            }
+        }
         assert_eq!(t["outputSchema"]["type"], "object");
     }
     let check = &tools[0];
@@ -221,11 +291,22 @@ fn answers_like_the_cli_through_the_stub_and_the_mock() {
             vec!["lookup", "nx.example.com", "--dns", &dns],
         ),
     ];
-    let messages: Vec<Value> = calls
+    // Only checked against the output schema: SPF, DKIM, MTA-STS, TLS-RPT and BIMI at work.
+    let more = [
+        json!({"domain": "spf.example.net", "checks": ["email"], "spf_ip": "192.0.2.10", "dns_server": dns}),
+        json!({"domain": "dkim.example.net", "checks": ["email"], "dkim_selectors": ["google", "ed", "revoked", "badb64"], "dns_server": dns}),
+        json!({"domain": "sts.example.net", "checks": ["email"], "dns_server": dns, "allow_private": true}),
+    ];
+    let mut messages: Vec<Value> = calls
         .iter()
         .enumerate()
         .map(|(i, (tool, args, _))| call(i as u64 + 2, tool, args.clone()))
         .collect();
+    let first_more = messages.len() as u64 + 2;
+    for (i, args) in more.iter().enumerate() {
+        messages.push(call(first_more + i as u64, "check_domain", args.clone()));
+    }
+    messages.push(json!({"jsonrpc": "2.0", "id": 99, "method": "tools/list"}));
     let (responses, code) = session(&server, &messages, &env);
     assert_eq!(code, 0);
     let rdap_hits = web.hits().len();
@@ -242,6 +323,32 @@ fn answers_like_the_cli_through_the_stub_and_the_mock() {
     for section in ["dns", "propagation", "email", "rdap", "tls", "http"] {
         assert_eq!(first[section]["status"], "ok", "{section}: {first}");
     }
+    // Every field a call returned is described by its tool's output schema.
+    let tools = responses.last().unwrap()["result"]["tools"].clone();
+    let schema = |tool: &str| {
+        let t = tools.as_array().unwrap().iter().find(|t| t["name"] == tool);
+        t.unwrap()["outputSchema"].clone()
+    };
+    let (report, lookup) = (schema("check_domain"), schema("dns_lookup"));
+    for r in &responses[1..responses.len() - 1] {
+        let content = &r["result"]["structuredContent"];
+        let s = match content.get("reports") {
+            Some(_) => &report,
+            None => &lookup,
+        };
+        let wrong = misfits(s, s, content, "");
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+    let spf = &responses[calls.len() + 1]["result"]["structuredContent"];
+    assert_eq!(
+        spf["reports"][0]["email"]["spf"]["result"]["result"],
+        "pass"
+    );
+    let item = &report["properties"]["reports"]["items"]["properties"];
+    assert_eq!(
+        item["email"]["properties"]["status"]["enum"],
+        json!(["ok", "unavailable", "rate_limited", "skipped"])
+    );
 }
 
 #[test]

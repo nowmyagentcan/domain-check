@@ -84,7 +84,7 @@ struct DnsLookup {
     name: String,
     /// Record types to ask for; A and AAAA when omitted, PTR for an IP address
     #[serde(default)]
-    #[schemars(schema_with = "type_list")]
+    #[schemars(schema_with = "maybe_type_list")]
     types: Option<Vec<String>>,
     /// The resolver to ask, IP[:PORT]; this computer's when omitted
     server: Option<String>,
@@ -108,6 +108,13 @@ fn check_list(_: &mut SchemaGenerator) -> Schema {
 
 fn type_list(_: &mut SchemaGenerator) -> Schema {
     names(&lookup::TYPES.map(|t| t.to_string()))
+}
+
+/// `type_list`, or null for the default.
+fn maybe_type_list(g: &mut SchemaGenerator) -> Schema {
+    let mut s = type_list(g);
+    s.insert("type".into(), json!(["array", "null"]));
+    s
 }
 
 /// A list of at least one of `names`, each once.
@@ -296,42 +303,174 @@ fn output(schema: Value) -> Arc<JsonObject> {
     }
 }
 
-/// The `check --json` object's outline: sections are described, not spelt out field by field.
+/// An object with every one of `fields`.
+fn object(fields: Value) -> Value {
+    let names: Vec<_> = fields
+        .as_object()
+        .into_iter()
+        .flat_map(|f| f.keys())
+        .collect();
+    json!({ "type": "object", "required": names, "properties": fields })
+}
+
+/// `schema`, or null.
+fn or_null(mut schema: Value) -> Value {
+    if let Some(Value::String(t)) = schema.get("type") {
+        schema["type"] = json!([t, "null"]);
+    }
+    if let Some(Value::Array(names)) = schema.get_mut("enum")
+        && !names.contains(&Value::Null)
+    {
+        names.push(Value::Null);
+    }
+    schema
+}
+
+/// A section: its status, the reason it isn't ok, and `fields`, all null unless it is ok.
+fn section(about: &str, fields: Value) -> Value {
+    let Value::Object(mut fields) = fields else {
+        unreachable!("written as an object")
+    };
+    for v in fields.values_mut() {
+        *v = or_null(v.take());
+    }
+    let status = json!({ "enum": ["ok", "unavailable", "rate_limited", "skipped"] });
+    fields.insert("status".into(), status);
+    fields.insert("reason".into(), json!({ "type": ["string", "null"] }));
+    let mut schema = or_null(object(Value::Object(fields)));
+    schema["description"] = about.into();
+    schema
+}
+
+/// The `check --json` object, every field of it.
 fn report_schema() -> Value {
-    let section = |about: &str| json!({ "type": ["object", "null"], "description": about });
-    let text = json!({ "type": "string" });
-    let maybe = json!({ "type": ["string", "null"] });
+    let t = |kind: &str| json!({ "type": kind });
+    let maybe = |kind: &str| json!({ "type": [kind, "null"] });
+    let list = |items: Value| json!({ "type": "array", "items": items });
+    let map = |values: Value| json!({ "type": "object", "additionalProperties": values });
+    let (text, int, yes) = (t("string"), t("integer"), t("boolean"));
+    let texts = list(text.clone());
+    let got = json!({ "rcode": text, "values": texts, "ttl": maybe("integer") });
+    let mut seen = got.clone();
+    seen["agrees"] = maybe("boolean");
+    let chain = object(json!({
+        "start": text, "final": maybe("string"), "final_status": maybe("integer"), "error": maybe("string"),
+        "hops": list(object(json!({ "url": text, "status": int, "location": maybe("string"), "hsts": maybe("string") }))) }));
+    let spf_term = object(json!({
+        "term": text, "lookups": int, "record": maybe("string"), "error": maybe("string"),
+        "children": list(json!({ "$ref": "#/$defs/spf_term" })) }));
+    let dns = section(
+        "Records by type with TTLs, the zone, CNAME chain, CAA in force and DNSSEC",
+        json!({
+            "resolver": text, "exists": yes, "zone": maybe("string"),
+            "records": map(list(object(json!({ "value": text, "ttl": int })))),
+            "errors": map(text.clone()), "cname_chain": texts,
+            "caa": or_null(object(json!({ "found_at": text, "records": texts }))),
+            "dnssec": object(json!({
+                "signed": yes, "dnskey_algorithms": list(int.clone()), "validated_by": texts, "bogus": yes,
+                "ds": list(object(json!({ "key_tag": int, "algorithm": int, "algorithm_name": text, "digest_type": int }))) })) }),
+    );
+    let propagation = section(
+        "Each authoritative nameserver and resolver with its answers per type",
+        json!({
+            "types": texts, "zone": maybe("string"), "consistent": maybe("boolean"),
+            "varies": texts, "wildcard": yes, "rewrites_nxdomain": yes,
+            "authoritative": list(object(json!({
+                "server": text, "address": text, "status": text, "soa_serial": maybe("integer"),
+                "answers": map(object(got)) }))),
+            "resolvers": list(object(json!({
+                "name": text, "address": text, "status": text, "answers": map(object(seen)) }))) }),
+    );
+    let email = section(
+        "MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT and BIMI; errors holds the lookups that failed",
+        json!({
+            "errors": map(text.clone()),
+            "mx": object(json!({
+                "kind": or_null(json!({ "enum": ["mx", "null_mx", "implicit", "none"] })), "error": maybe("string"),
+                "hosts": list(object(json!({ "preference": int, "host": text, "addresses": texts, "cname": yes, "error": maybe("string") }))) })),
+            "spf": or_null(object(json!({
+                "record": text, "lookups": int, "lookups_capped": yes, "void_lookups": int,
+                "all": maybe("string"), "redirect": maybe("string"), "tree": list(json!({ "$ref": "#/$defs/spf_term" })),
+                "result": or_null(object(json!({
+                    "ip": text, "matched": maybe("string"), "via": texts,
+                    "result": { "enum": ["pass", "fail", "softfail", "neutral", "none", "permerror", "temperror"] } }))) }))),
+            "dmarc": or_null(object(json!({
+                "record": text, "found_at": text, "inherited": yes, "historic_tags": texts,
+                "tags": object(json!({
+                    "p": maybe("string"), "sp": maybe("string"), "np": maybe("string"), "adkim": maybe("string"),
+                    "aspf": maybe("string"), "t": maybe("string"), "psd": maybe("string"), "fo": maybe("string"),
+                    "rua": texts, "ruf": texts })),
+                "rua_authorized": list(object(json!({ "uri": text, "authorized": maybe("boolean") }))) }))),
+            "dkim": object(json!({
+                "selectors": texts, "given": yes,
+                "keys": list(object(json!({
+                    "selector": text, "name": text, "record": maybe("string"),
+                    "key_type": { "enum": ["rsa", "ed25519", "unknown"] }, "bits": maybe("integer"),
+                    "revoked": yes, "testing": yes, "error": maybe("string") }))) })),
+            "mta_sts": or_null(object(json!({
+                "record": text, "id": maybe("string"),
+                "policy": or_null(object(json!({
+                    "url": text, "mode": maybe("string"), "mx": texts, "max_age": maybe("integer"), "error": maybe("string") }))) }))),
+            "tls_rpt": or_null(object(json!({ "record": text, "rua": texts }))),
+            "bimi": or_null(object(json!({
+                "record": text, "logo": maybe("string"), "certificate": maybe("string"),
+                "logo_check": or_null(object(json!({ "fetched": yes, "content_type": maybe("string"), "tiny_ps": yes, "error": maybe("string") }))),
+                "certificate_check": or_null(object(json!({ "fetched": yes, "pem": yes, "error": maybe("string") }))) }))) }),
+    );
+    let rdap = section(
+        "The registration; retry_after (seconds) when rate_limited",
+        json!({
+            "server": maybe("string"), "queried": maybe("string"), "found": yes,
+            "registrar": or_null(object(json!({ "name": maybe("string"), "iana_id": maybe("string"), "rdap": maybe("string") }))),
+            "created": maybe("string"), "expires": maybe("string"), "updated": maybe("string"),
+            "domain_status": texts, "nameservers": texts, "dnssec_delegation": maybe("boolean"),
+            "registrar_data": or_null(object(json!({
+                "server": text, "status": { "enum": ["ok", "not_found", "unavailable", "rate_limited"] },
+                "expires": maybe("string"), "updated": maybe("string") }))),
+            "terms": maybe("string"), "bootstrap": text, "retry_after": maybe("integer") }),
+    );
+    let tls = section(
+        "The certificate on port 443: the chain as presented, trust, names and dates",
+        json!({
+            "address": maybe("string"), "port": int, "protocol": maybe("string"), "cipher": maybe("string"),
+            "alpn": maybe("string"), "trusted": maybe("boolean"),
+            "trust_error": or_null(json!({ "enum": ["expired", "not_yet_valid", "not_valid_for_name", "unknown_issuer", "incomplete_chain", "revoked", "other"] })),
+            "trust_detail": maybe("string"), "names_match": maybe("boolean"),
+            "not_before": maybe("string"), "not_after": maybe("string"),
+            "days_left": maybe("integer"), "lifetime_days": maybe("integer"),
+            "chain": list(object(json!({
+                "subject": text, "issuer": text, "serial": text, "not_before": text, "not_after": text,
+                "sans": texts, "key": text, "signature": text, "self_signed": yes, "ca": yes }))) }),
+    );
+    let http = section(
+        "The redirect chains from http and https, and the final https page's security headers",
+        json!({
+            "http": chain, "https": chain, "headers": or_null(map(maybe("string"))) }),
+    );
     json!({
         "type": "object",
         "required": ["reports", "summary", "data"],
         "properties": {
-            "reports": { "type": "array", "items": {
-                "type": "object",
-                "required": ["input", "domain", "unicode", "checked_at", "error", "counts", "findings",
-                             "dns", "propagation", "email", "rdap", "tls", "http"],
-                "properties": {
-                    "input": text, "domain": maybe, "unicode": maybe, "checked_at": text,
-                    "error": { "type": ["object", "null"] },
-                    "counts": { "type": "object", "properties": {
-                        "errors": { "type": "integer" }, "warnings": { "type": "integer" }, "info": { "type": "integer" } } },
-                    "findings": { "type": "array", "items": {
-                        "type": "object",
-                        "required": ["code", "severity", "check", "message", "hint"],
-                        "properties": {
-                            "code": text,
-                            "severity": { "enum": ["error", "warning", "info"] },
-                            "check": { "enum": ["dns", "propagation", "email", "rdap", "tls", "http"] },
-                            "message": text, "hint": maybe } } },
-                    "dns": section("Records by type with TTLs, zone, CNAME chain, CAA in force, DNSSEC; status ok, unavailable, rate_limited or skipped with a reason"),
-                    "propagation": section("Each authoritative nameserver and resolver with its answers per type; agrees, consistent, wildcard"),
-                    "email": section("MX, SPF (lookups, voids, tree, evaluation), DMARC, DKIM keys, MTA-STS, TLS-RPT, BIMI"),
-                    "rdap": section("Registrar, created, expires, updated, status, nameservers, DNSSEC delegation; retry_after when rate_limited"),
-                    "tls": section("The presented chain, trust, names, dates, days left, protocol and cipher"),
-                    "http": section("The redirect chains from http and https, and the final page's security headers")
-                } } },
-            "summary": { "type": "object" },
-            "data": { "type": "object", "properties": { "version": text, "rdap_bootstrap": text } }
-        }
+            "reports": list(object(json!({
+                "input": text, "domain": maybe("string"), "unicode": maybe("string"), "checked_at": text,
+                "error": or_null(object(json!({ "code": text, "message": text, "hint": maybe("string") }))),
+                "counts": object(json!({ "errors": int, "warnings": int, "info": int })),
+                "findings": list(object(json!({
+                    "code": text,
+                    "severity": { "enum": ["error", "warning", "info"] },
+                    "check": { "enum": ["dns", "propagation", "email", "rdap", "tls", "http"] },
+                    "message": text, "hint": maybe("string") }))),
+                "dns": dns,
+                "propagation": propagation,
+                "email": email,
+                "rdap": rdap,
+                "tls": tls,
+                "http": http
+            }))),
+            "summary": object(json!({ "domains": int, "errors": int, "warnings": int, "info": int, "unavailable": int })),
+            "data": object(json!({ "version": text, "rdap_bootstrap": text }))
+        },
+        "$defs": { "spf_term": spf_term }
     })
 }
 
