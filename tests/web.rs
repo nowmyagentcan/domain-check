@@ -367,7 +367,6 @@ fn https_that_fails_is_a_finding_without_the_tls_check() {
 }
 
 #[test]
-#[ignore = "known bug: DC13"]
 fn a_repeated_hsts_directive_is_invalid() {
     let (stub, web) = (DnsStub::new(), Web::new());
     let (_, r) = allowed(&stub, &web, "hstsdup.example.com");

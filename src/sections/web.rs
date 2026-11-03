@@ -182,20 +182,36 @@ fn grade(h: &Keyed<Option<String>>) -> Vec<Finding> {
         Some(v) => {
             let spaced = v.replace('=', " ");
             let age = directive(&spaced, "max-age");
-            match age.and_then(|a| a.trim().trim_matches('"').parse::<u64>().ok()) {
-                None => add(
+            let names: Vec<_> = spaced
+                .split(';')
+                .filter_map(|d| d.split_whitespace().next())
+                .collect();
+            // RFC 6797 §6.1, §8.1: each directive appears once, or browsers ignore the header.
+            let twice = (1..names.len())
+                .find(|&i| names[..i].iter().any(|n| n.eq_ignore_ascii_case(names[i])));
+            let age = age.and_then(|a| a.trim().trim_matches('"').parse::<u64>().ok());
+            match (twice.map(|i| names[i]), age) {
+                (Some(name), _) => add(
+                    Warning,
+                    "hsts_invalid",
+                    format!(
+                        "The Strict-Transport-Security header has {name} twice, so browsers ignore it."
+                    ),
+                    "",
+                ),
+                (None, None) => add(
                     Warning,
                     "hsts_invalid",
                     "The Strict-Transport-Security header has no valid max-age.".into(),
                     "",
                 ),
-                Some(n) if n < 15_552_000 => add(
+                (None, Some(n)) if n < 15_552_000 => add(
                     Warning,
                     "hsts_short",
                     format!("HSTS max-age is {n} s; at least 15552000 (180 days) is recommended."),
                     "Use max-age=63072000 (2 years).",
                 ),
-                Some(_) => {}
+                _ => {}
             }
         }
     }
