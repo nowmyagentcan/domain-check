@@ -764,7 +764,6 @@ fn terminal_controls_in_dns_data_never_reach_the_terminal() {
 }
 
 #[test]
-#[ignore = "known bug: DC30"]
 fn json_escapes_del_and_c1_controls_too() {
     let stub = DnsStub::new();
     let (_, out, _) = lookup(&stub, &["escapec1.example.com", "TXT", "--json"]);

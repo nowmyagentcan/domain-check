@@ -354,7 +354,8 @@ fn err(text: &str) {
     let _ = anstream::stderr().write_all(fit(&io::stderr(), text).as_bytes());
 }
 
-/// One JSON object on a line.
+/// One JSON object on a line, every control character escaped: serde_json leaves DEL and
+/// the C1 controls raw, and terminals read U+009B and U+009D as CSI and OSC.
 fn json(value: &impl serde::Serialize) -> Result<String, Error> {
     let text = serde_json::to_string(value).map_err(|e| {
         Error::new(
@@ -363,7 +364,14 @@ fn json(value: &impl serde::Serialize) -> Result<String, Error> {
             "Try again.",
         )
     })?;
-    Ok(text + "\n")
+    let mut out = String::with_capacity(text.len() + 1);
+    for c in text.chars() {
+        match c {
+            '\u{7f}'..='\u{9f}' => out += &format!("\\u{:04x}", c as u32),
+            c => out.push(c),
+        }
+    }
+    Ok(out + "\n")
 }
 
 /// An error's two lines on stderr: what failed, then how to fix it.
