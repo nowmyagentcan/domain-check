@@ -390,7 +390,6 @@ fn http_problems(report: &Value) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "known bug: DC18"]
 fn a_redirect_that_fails_after_the_first_hop_is_a_finding() {
     let (stub, web) = (DnsStub::new(), Web::new());
     // http:// sends visitors to a host whose certificate isn't trusted; https:// itself loads.
@@ -403,7 +402,6 @@ fn a_redirect_that_fails_after_the_first_hop_is_a_finding() {
 }
 
 #[test]
-#[ignore = "known bug: DC23"]
 fn an_https_chain_that_ends_on_http_is_a_finding() {
     let (stub, web) = (DnsStub::new(), Web::new());
     let (_, r) = allowed(&stub, &web, "downgrade.example.com");

@@ -119,6 +119,15 @@ fn follow(net: &Net, start: &str, until: Instant, tls: bool) -> (Chain, End) {
     }
 }
 
+/// The URL a chain that broke off couldn't load.
+fn failed_at(chain: &Chain) -> Option<String> {
+    let Some(last) = chain.hops.last() else {
+        return Some(chain.start.clone());
+    };
+    let next = Url::parse(&last.url).ok()?.join(last.location.as_deref()?);
+    next.ok().map(String::from)
+}
+
 /// The headers graded, as browsers and the OWASP Secure Headers Project name them.
 const HEADERS: [&str; 16] = [
     "Strict-Transport-Security",
@@ -421,6 +430,23 @@ pub fn run(cx: &Cx, facts: &Facts) -> (Section<Web>, Vec<Finding>) {
             "",
         ));
     }
+    // A later hop of the http chain failing where the https chain didn't go: nobody else says so.
+    if let End::Failed(f) = &http_end
+        && !http.hops.is_empty()
+        && !matches!(f, Failed::Private { .. })
+        && let Some(url) = failed_at(&http)
+        && !https.hops.iter().any(|h| h.url == url)
+        && !(matches!(https_end, End::Failed(_)) && failed_at(&https).as_ref() == Some(&url))
+    {
+        let why = http.error.as_deref().unwrap_or_default();
+        let message = format!("http://{d}/ redirects to {url}, which fails: {why}.");
+        found.push(finding(
+            Severity::Warning,
+            "http_redirect_failed",
+            message,
+            "",
+        ));
+    }
     if let End::Failed(f) = &https_end {
         // The first connection is the certificate check's to report, when it runs.
         let first_hop = https.hops.is_empty() && cx.tls;
@@ -433,6 +459,11 @@ pub fn run(cx: &Cx, facts: &Facts) -> (Section<Web>, Vec<Finding>) {
             let message = format!("Couldn't load https://{d}/: {why}.");
             found.push(finding(Severity::Warning, "https_failed", message, ""));
         }
+    }
+    if let Some(end) = https.end.as_deref().filter(|u| u.starts_with("http:")) {
+        let message = format!("https://{d}/ redirects to {end}, which is plain HTTP.");
+        let hint = "Keep every redirect on https://.";
+        found.push(finding(Severity::Warning, "https_downgrade", message, hint));
     }
     if let Some(status @ 400..) = https.final_status {
         let n = https.hops.len() - 1;
