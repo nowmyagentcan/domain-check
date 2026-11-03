@@ -76,9 +76,11 @@ Exit codes: 0 clean, 1 error findings or bad input, 2 usage error, 3 a check cou
 
 ### Use with AI agents
 
-`--json` prints one JSON object: `reports` (findings with code, severity, message and hint, then one object per check), `summary` and `data`.
-`domain-check mcp` is a local MCP server on stdio with two tools: `check_domain` (one domain's report) and `dns_lookup` (one query).
-Bad arguments give `isError` and `{"error": {"code", "message", "hint"}}`.
+`check --json` prints `{reports, summary, data}`: per domain, `findings` (code, severity, message, hint), `counts` and one object per check, or `error` (`{code, message, hint}`) for input it refuses, such as `special_use`.
+`lookup --json` prints `{name, server, results}`, with `{type, rcode, authoritative, authenticated, records: [{value, ttl}], error}` per type.
+Usage errors (exit 2, such as `--spf-ip nope`) print plain text on stderr and nothing on stdout.
+`domain-check mcp` is a local MCP server on stdio with two tools: `check_domain` (one domain's report) and `dns_lookup` (one query); results carry the same JSON.
+Bad arguments give `isError: true` and `{"error": {"code", "message", "hint"}}` as text.
 
 | Agent | Setup |
 |---|---|
@@ -90,7 +92,7 @@ Bad arguments give `isError` and `{"error": {"code", "message", "hint"}}`.
 ## Supported inputs and limits
 
 - A domain, a URL (`https://www.example.com/shop`) or an email address; internationalised names are shown in both forms (`bücher.de`, `xn--bcher-kva.de`). Up to 20 domains per run; IP addresses go to `lookup`.
-- Special-use names (`.test`, `.local`, `.internal`, `*.localhost` …) are refused without a query.
+- `check` refuses special-use names (`.test`, `.local`, `.internal`, `*.localhost` …) without a query (code `special_use`); `lookup` does send them to your resolver or `--dns`.
 - Email: MX, SPF with its DNS lookup and void lookup counts (RFC 7208), DMARC discovery (RFC 9989), DKIM keys and sizes for given or 8 common selectors, MTA-STS with its policy, TLS-RPT, BIMI. Registration: RDAP for the top-level domains IANA lists.
 - Not in this version: port 25 (STARTTLS, DANE), blocklists, WHOIS, cipher scans, certificate transparency, local DNSSEC validation.
 - `ui` and `mcp` take `--resolver` and `--ca-file` for every check they run.
