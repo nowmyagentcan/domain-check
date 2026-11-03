@@ -2,6 +2,8 @@
 
 Check a domain's DNS, email security, registration, certificate and headers from your own computer, with problems first.
 
+![domain-check ui after checking example.com](.github/screenshot.png)
+
 ## Install
 
 Windows (PowerShell, no admin; installs to `%LOCALAPPDATA%\Programs\domain-check` and adds it to your user PATH):
@@ -23,6 +25,8 @@ curl -fsSL https://github.com/nowmyagentcan/domain-check/releases/latest/downloa
 | macOS Intel | [domain-check-v0.1.0-macos-x64.tar.gz](https://github.com/nowmyagentcan/domain-check/releases/download/v0.1.0/domain-check-v0.1.0-macos-x64.tar.gz) |
 | Linux x64 | [domain-check-v0.1.0-linux-x64.tar.gz](https://github.com/nowmyagentcan/domain-check/releases/download/v0.1.0/domain-check-v0.1.0-linux-x64.tar.gz) |
 | Linux arm64 | [domain-check-v0.1.0-linux-arm64.tar.gz](https://github.com/nowmyagentcan/domain-check/releases/download/v0.1.0/domain-check-v0.1.0-linux-arm64.tar.gz) |
+
+Without the scripts: download an archive and `SHA256SUMS`, check it (`sha256sum -c SHA256SUMS --ignore-missing`, or `Get-FileHash` on Windows), and put `domain-check` on your PATH. It is one file with no runtime, account or API key.
 
 With Rust: `cargo install --git https://github.com/nowmyagentcan/domain-check --tag v0.1.0 --locked`.
 This is not the crates.io crate of the same name (a domain availability checker by another author), so installing by name from crates.io gets you that one instead.
@@ -96,6 +100,7 @@ Bad arguments give `isError: true` and `{"error": {"code", "message", "hint"}}` 
 - Email: MX, SPF with its DNS lookup and void lookup counts (RFC 7208), DMARC discovery (RFC 9989), DKIM keys and sizes for given or 8 common selectors, MTA-STS with its policy, TLS-RPT, BIMI. Registration: RDAP for the top-level domains IANA lists.
 - Not in this version: port 25 (STARTTLS, DANE), blocklists, WHOIS, cipher scans, certificate transparency, local DNSSEC validation.
 - `ui` and `mcp` take `--resolver` and `--ca-file` for every check they run.
+- Known bugs in v0.1.0, each pinned by a skipped test, are listed in the [release notes](https://github.com/nowmyagentcan/domain-check/releases/tag/v0.1.0).
 
 ### What goes online
 
