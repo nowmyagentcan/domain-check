@@ -1483,7 +1483,6 @@ fn severities<'a>(report: &'a Value, prefix: &str) -> Vec<&'a str> {
 }
 
 #[test]
-#[ignore = "known bug: DC03"]
 fn mx_hosts_without_addresses_are_void_lookups() {
     let stub = DnsStub::new();
     // Three mx terms whose hosts have no address: three void lookups before the ip4 match.
@@ -1496,6 +1495,13 @@ fn mx_hosts_without_addresses_are_void_lookups() {
         ["error"],
         "{:?}",
         found(&r, "spf")
+    );
+    // Without a sending IP the walk counts them the same way.
+    let (_, r) = email(&stub, "voidmx.example.net", &[]);
+    assert_eq!(
+        r["email"]["spf"]["void_lookups"], 3,
+        "{}",
+        r["email"]["spf"]
     );
 }
 

@@ -685,7 +685,7 @@ impl Eval {
                             }
                             Mech::Ptr => Ok(self.ptr(&name).await),
                             Mech::Exists => self
-                                .ask(&name, RecordType::A, true)
+                                .ask(&name, RecordType::A)
                                 .await
                                 .map(|found| !found.is_empty()),
                             _ => self.addresses(*mech, &name, *cidr).await,
@@ -722,16 +722,11 @@ impl Eval {
         })
     }
 
-    /// The values of `t` at `name`; a lookup that finds nothing counts as void when `void`.
-    async fn ask(
-        &mut self,
-        name: &str,
-        t: RecordType,
-        void: bool,
-    ) -> Result<Vec<String>, &'static str> {
+    /// The values of `t` at `name`; a lookup that finds nothing counts as void (§4.6.4).
+    async fn ask(&mut self, name: &str, t: RecordType) -> Result<Vec<String>, &'static str> {
         let found = self.mail.values(name, t).await.map_err(|_| "temperror")?;
         let found = found.unwrap_or_default();
-        if void && found.is_empty() {
+        if found.is_empty() {
             self.voids += 1;
             if self.voids > VOID_LIMIT {
                 return Err("permerror");
@@ -757,7 +752,7 @@ impl Eval {
     ) -> Result<bool, &'static str> {
         let hosts = match mech {
             Mech::Mx => {
-                let mx = self.ask(name, RecordType::MX, true).await?;
+                let mx = self.ask(name, RecordType::MX).await?;
                 if mx.len() > 10 {
                     return Err("permerror");
                 }
@@ -768,7 +763,8 @@ impl Eval {
         };
         let len = if self.ip.is_ipv4() { cidr.0 } else { cidr.1 };
         for host in hosts {
-            let found = self.ask(&host, self.family(), mech == Mech::A).await?;
+            // An mx host without an address is a void lookup too (§11.1).
+            let found = self.ask(&host, self.family()).await?;
             let mut nets = found.iter().filter_map(|v| v.parse().ok());
             if nets.any(|net| within(self.ip, net, len)) {
                 return Ok(true);
@@ -937,7 +933,16 @@ impl Walk {
                                 hint,
                             ));
                         }
+                        let hosts = got.iter().flatten().flatten();
+                        let hosts = hosts.filter_map(|v| Some(v.split_once(' ')?.1.to_string()));
+                        let hosts: Vec<_> = hosts.filter(|h| h != ".").take(10).collect();
                         self.lookup(&mut node, &name, vec![got]);
+                        // Each host's addresses, as an evaluation looks them up (§4.6.4).
+                        for host in hosts {
+                            let both = [RecordType::A, RecordType::AAAA].map(|t| (host.clone(), t));
+                            let got = self.mail.all(both.to_vec()).await;
+                            self.lookup(&mut node, &host, got);
+                        }
                     }
                     Some(_) => {
                         let got = self.mail.values(&name, RecordType::A).await;
