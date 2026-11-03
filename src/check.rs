@@ -156,19 +156,31 @@ impl Facts {
             return Err((Status::Skipped, format!("{domain} doesn't exist in DNS.")));
         }
         let types = [RecordType::A, RecordType::AAAA];
-        let answers: Vec<_> = types.iter().filter_map(|&t| self.answer(t)).collect();
         let first = |t| {
             let m = self.answer(t)?.as_ref().ok()?;
             dns::value(&dns::records(m, t).next()?.data).parse().ok()
         };
         let ips: Vec<IpAddr> = types.into_iter().filter_map(first).collect();
-        match ips.is_empty() {
-            false => Ok(ips),
-            true if answers.iter().all(|a| a.is_err()) => Err(no_answer()),
-            true => Err((
+        // Only NOERROR and NXDOMAIN say what the domain has; SERVFAIL or REFUSED says nothing.
+        let code = |t| Some(self.answer(t)?.as_ref().ok()?.metadata.response_code);
+        let failed = types
+            .into_iter()
+            .map(code)
+            .find(|c| !matches!(c, Some(ResponseCode::NoError | ResponseCode::NXDomain)));
+        match (ips.is_empty(), failed) {
+            (false, _) => Ok(ips),
+            (true, None) => Err((
                 Status::Skipped,
                 format!("{domain} has no A or AAAA record."),
             )),
+            (true, Some(Some(code))) => Err((
+                Status::Unavailable,
+                format!(
+                    "The resolver couldn't get the address of {domain} ({}), so this check couldn't run.",
+                    dns::rcode(code)
+                ),
+            )),
+            (true, Some(None)) => Err(no_answer()),
         }
     }
 

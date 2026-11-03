@@ -447,14 +447,18 @@ fn an_x_frame_options_value_browsers_ignore_protects_nothing() {
 }
 
 #[test]
-#[ignore = "known bug: DC26"]
 fn addresses_that_fail_to_resolve_make_the_web_checks_unavailable() {
     let (stub, web) = (DnsStub::new(), Web::new());
-    for domain in ["servfail.example.com", "refused.example.com"] {
+    for (domain, rcode) in [
+        ("servfail.example.com", "SERVFAIL"),
+        ("refused.example.com", "REFUSED"),
+    ] {
         let (code, r) = http(&stub, &web, domain, &["--allow-private", "-c", "tls"]);
         for check in ["tls", "http"] {
             // A failed lookup says nothing about whether the domain has an address.
             assert_eq!(r[check]["status"], "unavailable", "{domain}: {}", r[check]);
+            let reason = r[check]["reason"].as_str().unwrap();
+            assert!(reason.contains(rcode), "{reason}");
         }
         assert_eq!(code, 3, "{domain}");
     }
