@@ -312,10 +312,11 @@ fn email(e: &Email) -> String {
         .dkim
         .keys
         .iter()
-        .filter(|k| k.record.is_some() && !k.revoked);
+        .filter(|k| k.error.is_some() || (k.record.is_some() && !k.revoked));
     let keys: Vec<_> = keys
-        .map(|k| match k.key_type {
-            "ed25519" => format!("{} Ed25519", k.selector),
+        .map(|k| match (&k.error, k.key_type) {
+            (Some(why), _) => format!("{} {why}", k.selector),
+            (None, "ed25519") => format!("{} Ed25519", k.selector),
             _ => format!(
                 "{} RSA {}",
                 k.selector,

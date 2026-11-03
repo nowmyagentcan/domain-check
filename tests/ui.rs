@@ -699,7 +699,6 @@ fn the_page_shows_and_copies_no_terminal_controls() {
 }
 
 #[test]
-#[ignore = "known bug: DC24"]
 fn the_page_script_renders_failed_mail_lookups() {
     // DMARC and the DKIM selector answer SERVFAIL: the Email line must not read "null".
     let checks: &[(&str, &[&str])] = &[("mailfail.example.net", &["-c", "email", "-s", "s"])];

@@ -218,13 +218,14 @@ const LINES = {
     return base + (silent ? ` · ${silent === 1 ? "1 nameserver address" : `${silent} nameserver addresses`} didn't answer` : "");
   },
   email: s => {
-    const k = s.dkim.keys.filter(k => !k.revoked);
+    const k = s.dkim.keys.filter(k => k.error || !k.revoked);
     return [`SPF ${s.spf ? `${s.spf.all || "no all"}, ${s.spf.lookups}/10 lookups` : "none"}`,
       `DMARC ${s.dmarc ? `p=${s.dmarc.tags.p}` : "none"}`,
-      `DKIM ${k.length ? k.map(k => `${k.selector} ${k.key_type === "ed25519" ? "Ed25519" : `RSA ${k.bits}`}`).join(", ") : noDkim(s.dkim)}`,
+      `DKIM ${k.length ? k.map(k => `${k.selector} ${k.error || (k.key_type === "ed25519" ? "Ed25519" : `RSA ${k.bits}`)}`).join(", ") : noDkim(s.dkim)}`,
       `MTA-STS ${s.mta_sts ? s.mta_sts.policy?.mode || "policy unavailable" : "none"}`,
       `TLS-RPT ${s.tls_rpt ? "yes" : "none"}`,
-      `BIMI ${s.bimi ? (s.bimi.logo ? "logo" : "declined") : "none"}`].join(" · ");
+      `BIMI ${s.bimi ? (s.bimi.logo ? "logo" : "declined") : "none"}`]
+      .map((p, i) => s.errors[MAIL[i]] ? `${p.split(" ")[0]} ${s.errors[MAIL[i]]}` : p).join(" · ");
   },
   rdap: s => !s.found ? "no registration record" : [s.registrar && `${s.registrar.name}${s.registrar.iana_id ? ` (${s.registrar.iana_id})` : ""}`,
     `created ${date(s.created)}`, s.expires && `expires ${date(s.expires)}`, s.domain_status.join(", ")].filter(Boolean).join(" · "),
@@ -238,6 +239,8 @@ const LINES = {
   },
 };
 const dnssec = d => d.bogus ? "bogus" : !d.signed ? "unsigned" : d.validated_by.length ? "signed, validated" : "signed, not validated";
+// The email parts in the Email line's order, as `errors` names them.
+const MAIL = ["spf", "dmarc", "dkim", "mta_sts", "tls_rpt", "bimi"];
 const noDkim = d => d.given ? `none at ${d.selectors.join(", ")}` : "none of 8 common selectors";
 const line = (r, k) => r[k].status === "ok" ? LINES[k](r[k]) : `${r[k].status.replace("_", " ")}: ${r[k].reason}`;
 
@@ -262,14 +265,14 @@ const BODIES = {
       h`<tr><td>${name}<small class="mono"> ${row.address}</small></td>${s.types.map(t => cell(row.answers?.[t], row))}</tr>`)}</tbody></table></div>
     <small>${icon("agrees")} agrees with the nameservers, ${icon("differs")} differs, ${icon("missing")} no record, ${icon("silent")} no answer. Numbers are TTLs in seconds; hover a cell for the values.</small>
     ${s.varies.length ? h`<small>The nameservers' answers vary for ${s.varies.join(", ")}, so resolvers aren't compared for those.</small>` : ""}`,
-  email: s => dl([
+  email: s => { const none = k => s.errors[k] ? h`<span class="error">${s.errors[k]}</span>` : "none"; return dl([
     ["MX", s.mx.kind === "mx" ? s.mx.hosts.map(m => h`<span>${m.preference} <span class="mono">${m.host}</span> <small>${m.addresses.join(", ") || m.error}</small></span>`) : { null_mx: "null MX: accepts no email", implicit: "none; mail goes to the A/AAAA address", none: "none" }[s.mx.kind]],
-    ["SPF", s.spf ? h`${mono(s.spf.record)}<small>${s.spf.lookups}/10 DNS lookups, ${s.spf.void_lookups} void${s.spf.result ? h`, ${s.spf.result.ip}: ${s.spf.result.result}` : ""}</small>${s.spf.tree.length ? spfTree(s.spf.tree) : ""}` : "none"],
-    ["DMARC", s.dmarc ? h`${mono(s.dmarc.record)}<small>at ${s.dmarc.found_at}${s.dmarc.inherited ? " (inherited)" : ""}${s.dmarc.historic_tags.length ? h`; no longer used: ${s.dmarc.historic_tags.join(", ")}` : ""}</small>` : "none"],
-    ["DKIM", s.dkim.keys.length ? s.dkim.keys.map(k => h`<span><span class="mono">${k.name}</span> <small>${k.revoked ? "revoked" : k.key_type === "ed25519" ? "Ed25519" : `RSA ${k.bits} bits`}${k.testing ? ", testing" : ""}</small></span>`) : noDkim(s.dkim)],
-    ["MTA-STS", s.mta_sts ? h`${mono(s.mta_sts.record)}<small>${policy(s.mta_sts.policy)}</small>` : "none"],
-    ["TLS-RPT", s.tls_rpt ? mono(s.tls_rpt.record) : "none"],
-    ["BIMI", s.bimi ? mono(s.bimi.record) : "none"]]),
+    ["SPF", s.spf ? h`${mono(s.spf.record)}<small>${s.spf.lookups}/10 DNS lookups, ${s.spf.void_lookups} void${s.spf.result ? h`, ${s.spf.result.ip}: ${s.spf.result.result}` : ""}</small>${s.spf.tree.length ? spfTree(s.spf.tree) : ""}` : none("spf")],
+    ["DMARC", s.dmarc ? h`${mono(s.dmarc.record)}<small>at ${s.dmarc.found_at}${s.dmarc.inherited ? " (inherited)" : ""}${s.dmarc.historic_tags.length ? h`; no longer used: ${s.dmarc.historic_tags.join(", ")}` : ""}</small>` : none("dmarc")],
+    ["DKIM", s.dkim.keys.length ? s.dkim.keys.map(k => h`<span><span class="mono">${k.name}</span> ${k.error ? h`<span class="error">${k.error}</span>` : h`<small>${k.revoked ? "revoked" : k.key_type === "ed25519" ? "Ed25519" : `RSA ${k.bits} bits`}${k.testing ? ", testing" : ""}</small>`}</span>`) : s.errors.dkim ? none("dkim") : noDkim(s.dkim)],
+    ["MTA-STS", s.mta_sts ? h`${mono(s.mta_sts.record)}<small>${policy(s.mta_sts.policy)}</small>` : none("mta_sts")],
+    ["TLS-RPT", s.tls_rpt ? mono(s.tls_rpt.record) : none("tls_rpt")],
+    ["BIMI", s.bimi ? mono(s.bimi.record) : none("bimi")]]); },
   rdap: s => dl([["Registrar", s.registrar?.name], ["Created", date(s.created)], ["Expires", s.expires && date(s.expires)], ["Updated", s.updated && date(s.updated)],
     ["Status", s.domain_status.join(", ")], ["Nameservers", s.nameservers.join(", ")], ["DNSSEC", s.dnssec_delegation == null ? null : s.dnssec_delegation ? "delegation signed" : "not signed"],
     ["Server", h`<span class="mono">${s.server}</span><small>bootstrap ${s.bootstrap}</small>`]]),

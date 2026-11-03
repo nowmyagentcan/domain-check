@@ -1585,7 +1585,6 @@ fn a_repeated_mta_sts_mode_is_a_policy_error() {
 }
 
 #[test]
-#[ignore = "known bug: DC24"]
 fn failed_dmarc_and_dkim_lookups_dont_read_as_missing() {
     let stub = DnsStub::new();
     let dns = stub.addr();
