@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use super::{Mail, Part, finding};
+use super::{Mail, Part, finding, repeated};
 use crate::check::within;
 use crate::dns::RecordType;
 use crate::report::{Finding, Severity};
@@ -179,6 +179,9 @@ async fn read(mail: &Arc<Mail>, name: &str, record: &str, found: &mut Vec<Findin
             found.push(syntax(name, &what));
         }
         *field = checked;
+    }
+    if let Some(tag) = repeated(&pairs(record)) {
+        found.push(syntax(name, &format!("{tag}= appears more than once")));
     }
     if tags.p.is_none() {
         // A record with report addresses but no usable policy reads as p=none (RFC 9989

@@ -92,6 +92,14 @@ pub fn got(a: &Answer, t: RecordType) -> Found {
     }
 }
 
+/// The first tag named twice: that makes a DKIM or DMARC tag-list invalid (RFC 6376 §3.2).
+fn repeated<T>(pairs: &[(String, T)]) -> Option<&str> {
+    let names = pairs.iter().map(|(t, _)| t.as_str());
+    names
+        .enumerate()
+        .find_map(|(i, t)| pairs[..i].iter().any(|(u, _)| u == t).then_some(t))
+}
+
 pub fn finding(
     severity: Severity,
     code: &'static str,

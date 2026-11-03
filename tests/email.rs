@@ -1514,7 +1514,6 @@ fn terms_after_all_are_never_evaluated() {
 }
 
 #[test]
-#[ignore = "known bug: DC06"]
 fn a_repeated_dmarc_tag_is_invalid() {
     let stub = DnsStub::new();
     let (_, r) = email(&stub, "dupdmarc.example.net", &[]);
@@ -1556,7 +1555,6 @@ fn two_keys_at_one_selector_are_flagged() {
 }
 
 #[test]
-#[ignore = "known bug: DC09"]
 fn a_repeated_dkim_tag_makes_the_record_invalid() {
     let stub = DnsStub::new();
     let (_, r) = email(&stub, "duptag.example.net", &["-s", "s"]);

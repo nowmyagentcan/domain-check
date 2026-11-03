@@ -10,7 +10,7 @@ use x509_parser::prelude::FromDer;
 use x509_parser::public_key::{PublicKey, RSAPublicKey};
 use x509_parser::x509::SubjectPublicKeyInfo;
 
-use super::{Mail, finding};
+use super::{Mail, finding, repeated};
 use crate::Error;
 use crate::dns::RecordType;
 use crate::report::{Finding, Severity};
@@ -121,7 +121,9 @@ fn key(selector: &str, name: String, record: String) -> (Key, Option<String>) {
         error: None,
     };
     let v_first = tags.first().is_some_and(|(t, _)| t == "v");
-    let problem = if tag("v").is_some_and(|v| v != "DKIM1" || !v_first) {
+    let problem = if let Some(t) = repeated(&tags) {
+        Some(format!("{t}= appears more than once"))
+    } else if tag("v").is_some_and(|v| v != "DKIM1" || !v_first) {
         Some("v= isn't DKIM1".to_string())
     } else if out.key_type == "unknown" {
         Some(format!("k={k} is unknown"))
