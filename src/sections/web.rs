@@ -139,13 +139,17 @@ const HEADERS: [&str; 16] = [
     "X-AspNetMvc-Version",
 ];
 
-/// Each graded header's value as sent (repeated ones joined with `, `), keyed in lower case.
+/// Each graded header's value as sent, keyed in lower case. A repeated header is joined with
+/// `, ` as Fetch combines it, except Strict-Transport-Security: only the first counts (RFC 6797
+/// §8.1).
 fn graded(sent: &ureq::http::HeaderMap) -> Keyed<Option<String>> {
     let value = |name: &str| {
         let values = sent.get_all(name).iter();
-        let values: Vec<_> = values
-            .map(|v| String::from_utf8_lossy(v.as_bytes()))
-            .collect();
+        let values = values.map(|v| String::from_utf8_lossy(v.as_bytes()));
+        let values: Vec<_> = match name {
+            "Strict-Transport-Security" => values.take(1).collect(),
+            _ => values.collect(),
+        };
         (!values.is_empty()).then(|| values.join(", "))
     };
     Keyed(
@@ -165,6 +169,22 @@ fn directive<'a>(policy: &'a str, name: &str) -> Option<&'a str> {
             .unwrap_or((d, ""));
         key.eq_ignore_ascii_case(name).then_some(rest)
     })
+}
+
+/// Whether browsers refuse to frame a page sending `X-Frame-Options: <value>`: one DENY or
+/// SAMEORIGIN, or different values of which one is DENY, SAMEORIGIN or ALLOWALL (HTML §7.7).
+fn blocks_framing(value: &str) -> bool {
+    let mut values: Vec<_> = value
+        .split(',')
+        .map(|v| v.trim().to_ascii_lowercase())
+        .collect();
+    values.sort();
+    values.dedup();
+    let known = |v: &String| matches!(v.as_str(), "deny" | "sameorigin" | "allowall");
+    match values.as_slice() {
+        [one] => one == "deny" || one == "sameorigin",
+        many => many.iter().any(known),
+    }
 }
 
 /// The header rules (spec §8.7), from the OWASP Secure Headers Project's recommendations.
@@ -226,11 +246,16 @@ fn grade(h: &Keyed<Option<String>>) -> Vec<Finding> {
             "No Content-Security-Policy header.".into(),
             "Start with \"default-src 'self'; object-src 'none'; frame-ancestors 'none'\" and adjust.",
         ),
-        Some(policy) => {
-            let scripts = directive(policy, "script-src").or(directive(policy, "default-src"));
+        Some(csp) => {
+            // Each policy of the list applies (CSP3 §2.2.1): a script runs when all allow it.
+            let scripts: Vec<_> = csp
+                .split(',')
+                .filter_map(|p| directive(p, "script-src").or(directive(p, "default-src")))
+                .map(str::to_ascii_lowercase)
+                .collect();
             let unsafe_: Vec<_> = ["'unsafe-inline'", "'unsafe-eval'"]
                 .into_iter()
-                .filter(|u| scripts.is_some_and(|s| s.to_ascii_lowercase().contains(u)))
+                .filter(|u| !scripts.is_empty() && scripts.iter().all(|s| s.contains(u)))
                 .collect();
             if !unsafe_.is_empty() {
                 let message = format!(
@@ -241,16 +266,32 @@ fn grade(h: &Keyed<Option<String>>) -> Vec<Finding> {
             }
         }
     }
-    if !get("X-Content-Type-Options").is_some_and(|v| v.trim().eq_ignore_ascii_case("nosniff")) {
+    // Fetch reads the first value of the list.
+    let nosniff = get("X-Content-Type-Options").is_some_and(|v| {
+        v.split(',')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .eq_ignore_ascii_case("nosniff")
+    });
+    if !nosniff {
         let message = "No \"X-Content-Type-Options: nosniff\" header.".into();
         add(Warning, "xcto_missing", message, "Add it.");
     }
-    let ancestors = csp.as_deref().and_then(|p| directive(p, "frame-ancestors"));
-    if get("X-Frame-Options").is_none() && ancestors.is_none() {
+    let ancestors = csp.as_deref().is_some_and(|c| {
+        c.split(',')
+            .any(|p| directive(p, "frame-ancestors").is_some())
+    });
+    let xfo = get("X-Frame-Options");
+    if !ancestors && !xfo.as_deref().is_some_and(blocks_framing) {
+        let message = match xfo {
+            None => "Neither X-Frame-Options nor CSP frame-ancestors is set, so other sites can frame this page.".into(),
+            Some(v) => format!("X-Frame-Options: {v} doesn't stop framing and CSP frame-ancestors isn't set, so other sites can frame this page."),
+        };
         add(
             Warning,
             "frame_protection_missing",
-            "Neither X-Frame-Options nor CSP frame-ancestors is set, so other sites can frame this page.".into(),
+            message,
             "Add \"Content-Security-Policy: frame-ancestors 'self'\" or \"X-Frame-Options: DENY\".",
         );
     }
@@ -521,6 +562,19 @@ mod tests {
         );
         let frame = "frame_protection_missing Neither X-Frame-Options nor CSP frame-ancestors is set, so other sites can frame this page.";
         assert_eq!(csp("default-src 'self'"), [frame]);
+        let xfo = |v: &'static str| with(&[("x-frame-options", v)], "content-security-policy");
+        assert_eq!(
+            xfo("allowall")[1],
+            "frame_protection_missing X-Frame-Options: allowall doesn't stop framing and CSP frame-ancestors isn't set, so other sites can frame this page."
+        );
+        // Different values that name a known one block framing; one unknown value doesn't.
+        for (v, framed) in [
+            ("SAMEORIGIN, deny", false),
+            ("deny, DENY", false),
+            ("allow-from x", true),
+        ] {
+            assert_eq!(xfo(v).len(), 1 + framed as usize, "{v}");
+        }
         assert_eq!(
             with(&[("x-frame-options", "DENY")], "content-security-policy"),
             ["csp_missing No Content-Security-Policy header."]

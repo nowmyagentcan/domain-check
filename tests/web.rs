@@ -430,7 +430,6 @@ fn csp_directives_separated_by_tabs_are_read() {
 }
 
 #[test]
-#[ignore = "known bug: DC22"]
 fn an_x_frame_options_value_browsers_ignore_protects_nothing() {
     let (stub, web) = (DnsStub::new(), Web::new());
     let (_, r) = allowed(&stub, &web, "badframe.example.com");
@@ -492,7 +491,6 @@ fn hsts_max_age_is_read_as_rfc_6797_writes_it() {
 }
 
 #[test]
-#[ignore = "known bug: DC35"]
 fn headers_sent_twice_are_graded_as_browsers_read_them() {
     let (stub, web) = (DnsStub::new(), Web::new());
     let (_, r) = allowed(&stub, &web, "twiceheaders.example.com");
