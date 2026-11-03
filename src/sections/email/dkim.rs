@@ -197,11 +197,20 @@ pub async fn run(mail: Arc<Mail>, given: Vec<String>) -> (Dkim, Vec<Finding>) {
                 continue;
             }
         };
-        let Some(record) = txts.into_iter().find(|t| is_key(t)) else {
+        let mut records: Vec<_> = txts.into_iter().filter(|t| is_key(t)).collect();
+        let n = records.len();
+        if n == 0 {
             missing.push(selector.clone());
             continue;
+        }
+        let (k, problem) = key(selector, name.clone(), records.swap_remove(0));
+        // RFC 6376 §3.6.2.2: with more than one key record, which one a receiver uses is undefined.
+        let problem = match n {
+            1 => problem,
+            n => Some(format!(
+                "{n} key records answer there, and receivers may use either"
+            )),
         };
-        let (k, problem) = key(selector, name.clone(), record);
         if let Some(what) = problem {
             let message = format!("The DKIM record at {name} is invalid: {what}.");
             let hint = "Copy the record again from your mail provider.";

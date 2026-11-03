@@ -1541,7 +1541,6 @@ fn a_record_with_rua_and_no_p_is_read_as_p_none() {
 }
 
 #[test]
-#[ignore = "known bug: DC08"]
 fn two_keys_at_one_selector_are_flagged() {
     let stub = DnsStub::new();
     let (_, r) = email(&stub, "twokeys.example.net", &["-s", "s"]);
