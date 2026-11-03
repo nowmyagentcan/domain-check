@@ -415,7 +415,6 @@ fn an_https_chain_that_ends_on_http_is_a_finding() {
 }
 
 #[test]
-#[ignore = "known bug: DC21"]
 fn csp_directives_separated_by_tabs_are_read() {
     let (stub, web) = (DnsStub::new(), Web::new());
     let (_, r) = allowed(&stub, &web, "tabcsp.example.com");

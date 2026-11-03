@@ -156,10 +156,13 @@ fn graded(sent: &ureq::http::HeaderMap) -> Keyed<Option<String>> {
     )
 }
 
-/// The directive `name` of a policy like `default-src 'self'; frame-ancestors 'none'`.
+/// The directive `name` of a policy like `default-src 'self'; frame-ancestors 'none'`; the
+/// name ends at any ASCII whitespace, tab included (CSP3 §2.2.1).
 fn directive<'a>(policy: &'a str, name: &str) -> Option<&'a str> {
     policy.split(';').map(str::trim).find_map(|d| {
-        let (key, rest) = d.split_once(' ').unwrap_or((d, ""));
+        let (key, rest) = d
+            .split_once(|c: char| c.is_ascii_whitespace())
+            .unwrap_or((d, ""));
         key.eq_ignore_ascii_case(name).then_some(rest)
     })
 }
