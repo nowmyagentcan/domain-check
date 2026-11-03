@@ -187,14 +187,19 @@ impl Answer {
                 Some("NOERROR") if !r.records.is_empty() => {
                     for v in &r.records {
                         let row = [&v.owner, &v.ttl.to_string(), &r.kind, &v.value];
-                        rows.push(row.map(String::from));
+                        rows.push(row.map(|s| text::escape(s)));
                     }
                     continue;
                 }
                 Some("NOERROR") => format!("; NODATA {}", r.kind),
                 Some(code) => format!("; {code} {}", r.kind),
             };
-            rows.push([self.name.clone(), empty, String::new(), String::new()]);
+            rows.push([
+                text::escape(&self.name),
+                empty,
+                String::new(),
+                String::new(),
+            ]);
         }
         let records = || rows.iter().filter(|r| !r[2].is_empty());
         let width = |i: usize| records().map(|r| r[i].len()).max().unwrap_or(0);

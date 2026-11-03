@@ -3,7 +3,7 @@
 //! each try waits 2 s (TCP 4 s) and a try that gets no answer is made once more.
 
 use std::fmt;
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -189,9 +189,7 @@ impl Resolver {
             };
             let ms = start.elapsed().as_millis();
             let via = if tcp { "tcp" } else { "udp" };
-            let line = format!("debug: dns {via} {to} {name} {t} {outcome} {ms} ms\n");
-            // A closed stderr loses debug lines quietly.
-            let _ = std::io::stderr().write_all(line.as_bytes());
+            crate::net::debug(&format!("dns {via} {to} {name} {t} {outcome} {ms} ms"));
         }
         answer
     }

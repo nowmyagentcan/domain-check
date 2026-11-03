@@ -735,7 +735,6 @@ fn a_ca_file_with_one_broken_block_among_good_ones_is_a_usage_error() {
 }
 
 #[test]
-#[ignore = "known bug: DC27"]
 fn terminal_controls_in_dns_data_never_reach_the_terminal() {
     let stub = DnsStub::new();
     let dns = stub.addr();
@@ -751,10 +750,15 @@ fn terminal_controls_in_dns_data_never_reach_the_terminal() {
         "--resolver",
         &dns,
     ];
-    for args in [&lookup[..], &check] {
-        let (_, out, _) = run(args, &env);
+    let debug = [&check[..], &["--debug"]].concat();
+    for args in [&lookup[..], &check, &debug] {
+        let (_, out, err) = run(args, &env);
         assert!(out.contains('\x1b'), "colour is on: {out:?}");
-        assert!(!out.contains("\x1b]"), "{out:?}");
-        assert!(!out.contains("\x1b[2J"), "{out:?}");
+        for text in [&out, &err] {
+            assert!(!text.contains("\x1b]"), "{text:?}");
+            assert!(!text.contains("\x1b[2J"), "{text:?}");
+        }
     }
+    // Shown, not dropped: whoever reads the record sees what it holds.
+    assert!(run(&lookup, &env).1.contains(r"\u{1b}]52;c;aGk="));
 }

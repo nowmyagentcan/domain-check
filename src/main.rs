@@ -368,9 +368,9 @@ fn json(value: &impl serde::Serialize) -> Result<String, Error> {
 
 /// An error's two lines on stderr: what failed, then how to fix it.
 fn fail(e: &Error) {
-    let mut text = format!("{} {}\n", text::red("✗"), e.message);
+    let mut text = format!("{} {}\n", text::red("✗"), text::escape(&e.message));
     if let Some(hint) = &e.hint {
-        text += &format!("  {}\n", text::dim(hint));
+        text += &format!("  {}\n", text::dim(&text::escape(hint)));
     }
     err(&text);
 }

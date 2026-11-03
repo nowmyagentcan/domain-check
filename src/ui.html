@@ -171,8 +171,11 @@ const form = $("form"), out = $("#out"), domain = $("#domain");
 const SECTIONS = { dns: "DNS", propagation: "Propagation", email: "Email", rdap: "Registration", tls: "Certificate", http: "Web" };
 const SEV = { error: "Error", warning: "Warning", info: "Info" };
 
+// Control characters from records and servers show as \u{1b}, as in the CLI: copied into a terminal, they'd act.
+const ctl = (s, re = /[\0-\x1f\x7f-\x9f]/g) => s.replace(re, c => `\\u{${c.charCodeAt(0).toString(16)}}`);
 // Every value from a report goes through esc; h`` escapes its ${} parts and returns markup that h`` won't escape again.
-const esc = v => v == null || v === false ? "" : Array.isArray(v) ? v.map(esc).join("") : v instanceof Markup ? v.s : String(v).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+const esc = v => v == null || v === false ? "" : Array.isArray(v) ? v.map(esc).join("") : v instanceof Markup ? v.s
+  : ctl(String(v), /[\0-\t\v-\x1f\x7f-\x9f]/g).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 function Markup(s) { this.s = s; }
 const h = (s, ...v) => new Markup(s.reduce((a, str, i) => a + esc(v[i - 1]) + str));
 const icon = (name, cls = "") => h`<svg class="${cls}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -308,7 +311,7 @@ function textReport(r) {
   const mark = { error: "✗", warning: "!", info: "i" }, w = Math.max(0, ...r.findings.map(f => f.check.length));
   return [`${r.domain}${r.unicode !== r.domain ? ` (${r.unicode})` : ""}  ${summaryLine(r)}`,
     ...r.findings.flatMap(f => [`${mark[f.severity]} ${f.check.padEnd(w)}  ${f.message}`, ...(f.hint ? [`${" ".repeat(w + 4)}${f.hint}`] : [])]),
-    "", ...Object.keys(SECTIONS).filter(k => r[k]).map(k => `${SECTIONS[k].padEnd(13)}${line(r, k)}`)].join("\n") + "\n";
+    "", ...Object.keys(SECTIONS).filter(k => r[k]).map(k => `${SECTIONS[k].padEnd(13)}${line(r, k)}`)].map(l => ctl(l)).join("\n") + "\n";
 }
 
 const showError = (message, hint) => out.innerHTML = h`<p class="err">${icon("error")}${message}</p>${hint ? h`<p class="hint muted">${forPage(hint)}</p>` : ""}`.s;

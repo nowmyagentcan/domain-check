@@ -8,7 +8,7 @@ use crate::Error;
 use crate::check::{self, CHECKS, Options};
 use crate::report::Check;
 use crate::sections::email::dkim;
-use crate::text::{bold, dim, red};
+use crate::text::{bold, dim, escape, red};
 
 /// Lines arriving within this long of each other were pasted together.
 const PASTE: Duration = Duration::from_millis(50);
@@ -68,9 +68,9 @@ fn selectors_now(selectors: &[String]) -> String {
 
 /// An error's two lines, indented like every answer.
 fn failed(e: &Error) -> String {
-    let mut out = format!("  {} {}\n", red("✗"), e.message);
+    let mut out = format!("  {} {}\n", red("✗"), escape(&e.message));
     if let Some(hint) = &e.hint {
-        out += &format!("    {}\n", dim(hint));
+        out += &format!("    {}\n", dim(&escape(hint)));
     }
     out
 }

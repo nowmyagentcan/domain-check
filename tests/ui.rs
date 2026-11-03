@@ -612,12 +612,14 @@ const stub = () => new Proxy(function () {}, {
 });
 const page = { document: stub(), navigator: stub(), URL: stub(), Blob: function () {}, addEventListener() {},
   innerHeight: 800, setTimeout, clearTimeout, setInterval, clearInterval };
-const [render, textReport] = vm.runInNewContext(script + "\n;[render, textReport]", page);
+const [render, textReport, out] = vm.runInNewContext(script + "\n;[render, textReport, out]", page);
 for (const res of JSON.parse(fs.readFileSync(0, "utf8"))) {
   try {
     render(res);
-    const lines = textReport(res.reports[0]).split("\n\n")[1];
+    const text = textReport(res.reports[0]), lines = text.split("\n\n")[1];
     if (!res.reports[0].error && /\b(null|undefined|NaN)\b/.test(lines)) console.log(`${res.reports[0].input}: ${lines}`);
+    // Pasted into a terminal, Copy's text must not carry control characters; nor may the page.
+    for (const s of [text, out.innerHTML]) if (/[\0-\t\v-\x1f\x7f-\x9f]/.test(s)) console.log(`${res.reports[0].input}: ${JSON.stringify(s)}`);
   } catch (e) { console.log(`${res.reports[0].input}: ${e.message}`); }
 }
 "#;
@@ -682,6 +684,16 @@ fn the_page_script_renders_reports_with_failed_parts() {
         ("selfsigned.example.com", &["-c", "dns,email,tls,http"]),
         ("closed.example.com", &["-c", "dns,email,tls,http"]),
         ("stsnoid.example.net", &["-c", "email"]),
+    ];
+    assert_eq!(page_errors(checks), "");
+}
+
+#[test]
+fn the_page_shows_and_copies_no_terminal_controls() {
+    // An SPF include holding OSC 52 (set the clipboard), and a TXT record holding ESC[2J.
+    let checks: &[(&str, &[&str])] = &[
+        ("escapespf.example.com", &["-c", "email"]),
+        ("escape.example.com", &["-c", "dns,email"]),
     ];
     assert_eq!(page_errors(checks), "");
 }

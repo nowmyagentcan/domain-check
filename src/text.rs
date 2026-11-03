@@ -53,6 +53,19 @@ pub fn unicode(stream: &impl IsTerminal) -> bool {
     true
 }
 
+/// `s` with each control character written as `\u{1b}`, so text from records, servers and
+/// inputs can't move the cursor, retitle the terminal or set the clipboard.
+pub fn escape(s: &str) -> String {
+    s.chars()
+        .fold(String::with_capacity(s.len()), |mut out, c| {
+            match c.is_control() {
+                true => out.extend(c.escape_unicode()),
+                false => out.push(c),
+            }
+            out
+        })
+}
+
 /// The text with the ASCII stand-ins for its symbols, arrows and box lines.
 pub fn ascii(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -120,9 +133,9 @@ pub fn report(r: &Report) -> String {
             Severity::Warning => yellow("!"),
             Severity::Info => dim("i"),
         };
-        out += &format!("{mark} {:width$}  {}\n", f.check.key(), f.message);
+        out += &format!("{mark} {:width$}  {}\n", f.check.key(), escape(&f.message));
         if let Some(hint) = &f.hint {
-            out += &format!("{:pad$}{}\n", "", dim(hint), pad = width + 4);
+            out += &format!("{:pad$}{}\n", "", dim(&escape(hint)), pad = width + 4);
         }
     }
     out += "\n";
@@ -149,10 +162,11 @@ fn invalid(r: &Report) -> String {
     let Some(e) = &r.error else {
         return String::new();
     };
-    let mut out = format!("{} {}  {}\n", red("✗"), r.input, e.message);
+    let input = escape(&r.input);
+    let mut out = format!("{} {input}  {}\n", red("✗"), escape(&e.message));
     if let Some(hint) = &e.hint {
-        let pad = r.input.chars().count() + 4;
-        out += &format!("{:pad$}{}\n", "", dim(hint));
+        let pad = input.chars().count() + 4;
+        out += &format!("{:pad$}{}\n", "", dim(&escape(hint)));
     }
     out
 }
@@ -204,9 +218,10 @@ pub fn summary_line(r: &Report) -> String {
 
 /// A section's line: its summary, or why it has none.
 fn line<T>(s: &Section<T>, summary: fn(&T) -> String) -> String {
-    let why = || format!("{}: {}", s.status.text(), s.reason.as_deref().unwrap_or(""));
+    let reason = escape(s.reason.as_deref().unwrap_or(""));
+    let why = || format!("{}: {reason}", s.status.text());
     match (&s.data, s.status) {
-        (Some(data), _) => summary(data),
+        (Some(data), _) => escape(&summary(data)),
         (None, Status::Unavailable | Status::RateLimited) => yellow(&why()),
         (None, _) => why(),
     }

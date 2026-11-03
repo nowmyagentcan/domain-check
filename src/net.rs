@@ -315,6 +315,7 @@ pub fn body(r: &mut Response<Body>, limit: u64) -> Result<Vec<u8>, Failed> {
 
 /// A `--debug` line on stderr; a closed stderr loses it quietly.
 pub fn debug(line: &str) {
+    let line = crate::text::escape(line);
     let _ = io::stderr().write_all(format!("debug: {line}\n").as_bytes());
 }
 
