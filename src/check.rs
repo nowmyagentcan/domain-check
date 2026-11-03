@@ -100,7 +100,8 @@ pub struct Cx {
     pub types: Vec<RecordType>,
     pub selectors: Vec<String>,
     pub spf_ip: Option<IpAddr>,
-    /// The tls check runs too, so the first https connection is its to report.
+    /// The tls check runs too, so the first https connection is its to report, unless it
+    /// trusted the certificate it got.
     pub tls: bool,
     pub rdap: Arc<rdap::Run>,
     /// When the domain's check began: every section's budget counts from here.
@@ -408,6 +409,11 @@ fn checked(
             Part::Down(status, why) => sections.not(outcome.check, status, &why),
         }
         findings.extend(outcome.findings);
+    }
+    let tls = sections.tls.as_ref().and_then(|s| s.data.as_ref());
+    if tls.is_some_and(|t| t.trusted == Some(true)) {
+        let web = sections.http.as_mut().and_then(|s| s.data.as_mut());
+        findings.extend(web.and_then(|w| w.unless_tls_trusted.take()));
     }
     Checked {
         checked_at,

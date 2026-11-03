@@ -173,7 +173,7 @@ fn what_the_chains_end_with_is_reported() {
     let (_, r) = http(&stub, &web, "selfsigned.example.com", &both);
     assert_eq!(
         r["http"]["https"]["error"],
-        "Certificate not trusted; see Certificate."
+        "the certificate of selfsigned.example.com isn't trusted"
     );
     let http_found: Vec<_> = r["findings"]
         .as_array()
@@ -192,6 +192,22 @@ fn what_the_chains_end_with_is_reported() {
         "{:?}",
         found(&r)
     );
+}
+
+#[test]
+fn a_first_https_failure_the_tls_check_did_not_see_is_a_finding() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let both = ["--allow-private", "-c", "tls"];
+    let (_, r) = http(&stub, &web, "caleaf.example.com", &both);
+    // The fetches refuse a CA certificate as a server's; the OS verifier may not.
+    let want = "the certificate of caleaf.example.com isn't trusted";
+    assert_eq!(r["http"]["https"]["error"], want, "{r}");
+    let failed = format!("https_failed: Couldn't load https://caleaf.example.com/: {want}.");
+    let reported = found(&r).contains(&failed);
+    match r["tls"]["trusted"].as_bool() {
+        Some(true) => assert!(reported, "{:?}", found(&r)),
+        _ => assert!(!reported && r["counts"]["errors"] != 0, "{:?}", found(&r)),
+    }
 }
 
 #[test]

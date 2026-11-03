@@ -414,6 +414,7 @@ pub const MAIL: &[(&str, RecordType, &str)] = {
         ("selfsigned.example.com", A, "127.0.0.1"),
         ("leafonly.example.com", A, "127.0.0.1"),
         ("weak.example.com", A, "127.0.0.1"),
+        ("caleaf.example.com", A, "127.0.0.1"),
         ("closed.example.com", AAAA, "::1"),
         // The first address refuses (nothing listens on 127.0.0.2), the second answers
         ("twoaddr.example.com", A, "127.0.0.2"),

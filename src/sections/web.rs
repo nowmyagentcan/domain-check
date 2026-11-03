@@ -20,6 +20,10 @@ pub struct Web {
     pub https: Chain,
     /// The graded headers of the https chain's last response, when it ended on https.
     pub headers: Option<Keyed<Option<String>>>,
+    /// The first https connection's failure, the tls check's to report unless it trusted the
+    /// certificate it got.
+    #[serde(skip)]
+    pub unless_tls_trusted: Option<Finding>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -56,9 +60,8 @@ fn finding(severity: Severity, code: &'static str, message: String, hint: &str) 
     Finding::new(Check::Http, severity, code, message, hint)
 }
 
-/// The chain from `start`, one hop per GET; `tls` when the tls check reports the first
-/// connection's certificate.
-fn follow(net: &Net, start: &str, until: Instant, tls: bool) -> (Chain, End) {
+/// The chain from `start`, one hop per GET.
+fn follow(net: &Net, start: &str, until: Instant) -> (Chain, End) {
     let mut chain = Chain {
         start: start.to_string(),
         ..Chain::default()
@@ -70,11 +73,8 @@ fn follow(net: &Net, start: &str, until: Instant, tls: bool) -> (Chain, End) {
         let response = match net.get(url.as_str(), until) {
             Ok(r) => r,
             Err(f) => {
-                chain.error = Some(match (&f, chain.hops.is_empty()) {
-                    (Failed::Certificate(_), true) if tls => {
-                        "Certificate not trusted; see Certificate.".into()
-                    }
-                    (Failed::Certificate(_), _) => format!(
+                chain.error = Some(match &f {
+                    Failed::Certificate(_) => format!(
                         "the certificate of {} isn't trusted",
                         url.host_str().unwrap_or_default()
                     ),
@@ -363,8 +363,8 @@ pub fn run(cx: &Cx, facts: &Facts) -> (Section<Web>, Vec<Finding>) {
     let until = cx.until(Check::Http);
     let net = &cx.net;
     let ((http, http_end), (https, https_end)) = std::thread::scope(|s| {
-        let plain = s.spawn(|| follow(net, &format!("http://{d}/"), until, cx.tls));
-        let secure = follow(net, &format!("https://{d}/"), until, cx.tls);
+        let plain = s.spawn(|| follow(net, &format!("http://{d}/"), until));
+        let secure = follow(net, &format!("https://{d}/"), until);
         let plain = plain
             .join()
             .unwrap_or_else(|e| std::panic::resume_unwind(e));
@@ -447,17 +447,20 @@ pub fn run(cx: &Cx, facts: &Facts) -> (Section<Web>, Vec<Finding>) {
             "",
         ));
     }
-    if let End::Failed(f) = &https_end {
-        // The first connection is the certificate check's to report, when it runs.
-        let first_hop = https.hops.is_empty() && cx.tls;
+    let mut unless_tls_trusted = None;
+    if let End::Failed(f) = &https_end
+        && !matches!(f, Failed::Private { .. })
+    {
+        let why = https.error.as_deref().unwrap_or_default();
+        let message = format!("Couldn't load https://{d}/: {why}.");
+        let failed = finding(Severity::Warning, "https_failed", message, "");
         let theirs = matches!(
             f,
             Failed::Connect(_) | Failed::Certificate(_) | Failed::Tls(_)
         );
-        if !(first_hop && theirs) && !matches!(f, Failed::Private { .. }) {
-            let why = https.error.as_deref().unwrap_or_default();
-            let message = format!("Couldn't load https://{d}/: {why}.");
-            found.push(finding(Severity::Warning, "https_failed", message, ""));
+        match https.hops.is_empty() && cx.tls && theirs {
+            true => unless_tls_trusted = Some(failed),
+            false => found.push(failed),
         }
     }
     if let Some(end) = https.end.as_deref().filter(|u| u.starts_with("http:")) {
@@ -489,6 +492,7 @@ pub fn run(cx: &Cx, facts: &Facts) -> (Section<Web>, Vec<Finding>) {
         http,
         https,
         headers,
+        unless_tls_trusted,
     };
     (Section::ok(web), found)
 }

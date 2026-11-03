@@ -599,7 +599,11 @@ impl Pki {
             ("wrongname", _) | (_, "mta-sts.stsname.example.net") => ["other.example.net"],
             _ => [sni],
         };
-        let leaf = params(&names, names[0], days, false);
+        let mut leaf = params(&names, names[0], days, false);
+        // A server certificate that says it is a CA: Windows takes it, webpki doesn't.
+        if label == "caleaf" {
+            leaf.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        }
         let key = KeyPair::generate().unwrap();
         let (inter, inter_key) = &self.intermediate;
         let signed = |issuer| leaf.signed_by(&key, &issuer).unwrap().der().clone();
