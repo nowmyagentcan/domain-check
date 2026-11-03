@@ -1606,3 +1606,15 @@ fn failed_dmarc_and_dkim_lookups_dont_read_as_missing() {
     assert!(line.contains("DMARC SERVFAIL"), "{line}");
     assert!(!line.contains("DKIM none"), "{line}");
 }
+
+#[test]
+#[ignore = "known bug: DC32"]
+fn a_version_with_more_digits_is_not_version_1() {
+    let stub = DnsStub::new();
+    let (_, r) = email(&stub, "stsv10.example.net", &[]);
+    // RFC 8461 §3.1, RFC 8460 §3: the version is the whole value of v=.
+    let e = &r["email"];
+    assert!(e["mta_sts"]["id"].is_null(), "{}", e["mta_sts"]);
+    assert!(e["tls_rpt"]["rua"].is_null(), "{}", e["tls_rpt"]);
+    assert!(e["bimi"]["logo"].is_null(), "{}", e["bimi"]);
+}

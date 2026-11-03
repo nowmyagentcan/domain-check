@@ -171,6 +171,9 @@ fn registry(name: &str, nth: usize) -> Reply {
         "example.org" | "single.example.org" => record(Some(300), &lock[1..2], false),
         "wild.example.org" => Reply::new(404, &[], ""),
         "limited.example.com" => Reply::new(429, &[("Retry-After", "42")], ""),
+        "limiteddate.example.com" => {
+            Reply::new(429, &[("Retry-After", "Sun, 01 Jan 2040 00:00:00 GMT")], "")
+        }
         "busy.example.com" => Reply::new(503, &[], ""),
         "flaky.example.com" if nth == 0 => Reply::new(502, &[], ""),
         "flaky.example.com" => record(Some(300), &lock, false),
@@ -320,6 +323,32 @@ pub fn route(host: &str, path: &str, https: bool, nth: usize) -> Reply {
             ("Content-Security-Policy", "default-src 'self'"),
             ("X-Frame-Options", "ALLOWALL"),
         ]),
+        ("cspnonce", true, _) => good_with(&[(
+            "Content-Security-Policy",
+            "script-src 'nonce-dGVzdA==' 'unsafe-inline'; frame-ancestors 'none'",
+        )]),
+        ("tabhsts", true, _) => good_with(&[(
+            "Strict-Transport-Security",
+            "max-age	=	63072000; includeSubDomains",
+        )]),
+        ("signedhsts", true, _) => good_with(&[("Strict-Transport-Security", "max-age=+63072000")]),
+        // The same headers twice, as when a proxy and the app behind it both add them.
+        ("twiceheaders", false, _) => to(301, "https://twiceheaders.example.com/"),
+        ("twiceheaders", true, _) => Reply::new(
+            200,
+            &[
+                ("Strict-Transport-Security", "max-age=63072000"),
+                ("Strict-Transport-Security", "max-age=63072000"),
+                ("Content-Security-Policy", "default-src 'self'"),
+                ("Content-Security-Policy", "frame-ancestors 'none'"),
+                ("X-Content-Type-Options", "nosniff"),
+                ("X-Content-Type-Options", "nosniff"),
+                ("Referrer-Policy", "no-referrer"),
+                ("Permissions-Policy", "camera=()"),
+                ("Cross-Origin-Opener-Policy", "same-origin"),
+            ],
+            "ok\n",
+        ),
         ("hstsdup", true, _) => Reply::new(
             200,
             &[("Strict-Transport-Security", "max-age=63072000; max-age=0")],

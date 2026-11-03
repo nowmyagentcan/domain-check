@@ -762,3 +762,18 @@ fn terminal_controls_in_dns_data_never_reach_the_terminal() {
     // Shown, not dropped: whoever reads the record sees what it holds.
     assert!(run(&lookup, &env).1.contains(r"\u{1b}]52;c;aGk="));
 }
+
+#[test]
+#[ignore = "known bug: DC30"]
+fn json_escapes_del_and_c1_controls_too() {
+    let stub = DnsStub::new();
+    let (_, out, _) = lookup(&stub, &["escapec1.example.com", "TXT", "--json"]);
+    // U+009B and U+009D open CSI and OSC in terminals that read C1 controls.
+    let raw: Vec<_> = out
+        .chars()
+        .filter(|c| ('\u{7f}'..='\u{9f}').contains(c))
+        .collect();
+    assert!(raw.is_empty(), "{raw:?}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert!(v.to_string().contains("a\u{7f}b\u{9b}2Jc"), "{v}");
+}

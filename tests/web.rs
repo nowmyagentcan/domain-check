@@ -462,3 +462,42 @@ fn addresses_that_fail_to_resolve_make_the_web_checks_unavailable() {
         assert_eq!(code, 3, "{domain}");
     }
 }
+
+#[test]
+#[ignore = "known bug: DC31"]
+fn unsafe_inline_beside_a_nonce_allows_no_inline_script() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let (_, r) = allowed(&stub, &web, "cspnonce.example.com");
+    // CSP3 §6.7.3.3: browsers ignore 'unsafe-inline' in a list that holds a nonce or a hash.
+    let codes = found(&r);
+    assert!(
+        !codes.iter().any(|c| c.starts_with("csp_unsafe")),
+        "{codes:?}"
+    );
+}
+
+#[test]
+#[ignore = "known bug: DC33"]
+fn hsts_max_age_is_read_as_rfc_6797_writes_it() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    // §6.1: whitespace may surround "=", and max-age is digits only.
+    let (_, r) = allowed(&stub, &web, "tabhsts.example.com");
+    let codes = found(&r);
+    assert!(!codes.iter().any(|c| c.starts_with("hsts_")), "{codes:?}");
+    let (_, r) = allowed(&stub, &web, "signedhsts.example.com");
+    let codes = found(&r);
+    assert!(
+        codes.iter().any(|c| c.starts_with("hsts_invalid")),
+        "{codes:?}"
+    );
+}
+
+#[test]
+#[ignore = "known bug: DC35"]
+fn headers_sent_twice_are_graded_as_browsers_read_them() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let (_, r) = allowed(&stub, &web, "twiceheaders.example.com");
+    // Fetch reads the first X-Content-Type-Options value, each CSP header is a policy of its
+    // own, and RFC 6797 §8.1 keeps the first Strict-Transport-Security.
+    assert_eq!(http_problems(&r), Vec::<String>::new());
+}

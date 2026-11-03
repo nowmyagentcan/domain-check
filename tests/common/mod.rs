@@ -374,6 +374,10 @@ pub const MAIL: &[(&str, RecordType, &str)] = {
         ("stsdup.example.net", MX, "10 mx1.example.net"),
         ("_mta-sts.stsdup.example.net", TXT, "v=STSv1; id=1"),
         ("mta-sts.stsdup.example.net", A, "127.0.0.1"),
+        ("stsv10.example.net", MX, "10 mx1.example.net"),
+        ("_mta-sts.stsv10.example.net", TXT, "v=STSv10; id=1"),
+        ("_smtp._tls.stsv10.example.net", TXT, "v=TLSRPTv10; rua=mailto:a@x.example.net"),
+        ("default._bimi.stsv10.example.net", TXT, "v=BIMI10; l=https://stsv10.example.net/l.svg"),
         ("stsnoid.example.net", A, "192.0.2.47"),
         ("_mta-sts.stsnoid.example.net", TXT, "v=STSv1; id=2026-10-31"),
         // Records that repeat a tag, or that a receiver reads differently from how they look
@@ -395,6 +399,7 @@ pub const MAIL: &[(&str, RecordType, &str)] = {
         ("mailfail.example.net", TXT, "v=spf1 -all"),
         // Terminal controls in record data: erase the screen, set the clipboard (OSC 52)
         ("escape.example.com", TXT, "safe[2J]52;c;aGk=end"),
+        ("escapec1.example.com", TXT, "a\u{7f}b\u{9b}2Jc\u{9d}0;t\u{9c}d\u{85}e"),
         ("escapespf.example.com", TXT, "v=spf1 include:]52;c;aGk=.example.com -all"),
         // TLS: the first label says what the web mock does (tests/common/web.rs)
         ("tls.example.com", A, "127.0.0.1"),
@@ -432,6 +437,10 @@ pub const MAIL: &[(&str, RecordType, &str)] = {
         ("downgrade.example.com", A, "127.0.0.1"),
         ("tabcsp.example.com", A, "127.0.0.1"),
         ("badframe.example.com", A, "127.0.0.1"),
+        ("cspnonce.example.com", A, "127.0.0.1"),
+        ("tabhsts.example.com", A, "127.0.0.1"),
+        ("signedhsts.example.com", A, "127.0.0.1"),
+        ("twiceheaders.example.com", A, "127.0.0.1"),
         // RDAP: tests/common/web.rs rdap() serves the registry and the registrar
         ("rdap.example.net", A, "127.0.0.1"),
         ("registrar.example.net", A, "127.0.0.1"),

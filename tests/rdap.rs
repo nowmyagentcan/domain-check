@@ -443,3 +443,15 @@ fn an_object_for_another_name_or_no_name_is_no_record() {
         );
     }
 }
+
+#[test]
+#[ignore = "known bug: DC34"]
+fn a_retry_after_date_is_turned_into_seconds() {
+    let (stub, web) = (DnsStub::new(), Web::new());
+    let (_, reports) = rdap(&stub, &web, &["limiteddate.example.com"], BOOTSTRAP);
+    // RFC 9110 §10.2.3: Retry-After is a number of seconds or an HTTP-date.
+    let s = &reports[0]["rdap"];
+    assert_eq!(s["status"], "rate_limited", "{s}");
+    let wait = s["retry_after"].as_u64().unwrap_or_default();
+    assert!(wait > 365 * 86_400, "{s}");
+}
